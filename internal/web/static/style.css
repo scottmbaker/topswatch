@@ -1,0 +1,497 @@
+:root {
+  --bg: #0d1117;
+  --bg-card: #161b22;
+  --bg-card-hover: #1c2330;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --accent: #58a6ff;
+  --accent-glow: rgba(88, 166, 255, 0.15);
+  --green: #3fb950;
+  --orange: #d29922;
+  --red: #f85149;
+  --cyan: #39d2c0;
+  --purple: #bc8cff;
+  --radius: 12px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  padding: 12px;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+header h1 {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+}
+
+header h1 span {
+  color: var(--accent);
+}
+
+.header-meta {
+  font-size: 13px;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+.range-select {
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-family: inherit;
+  margin-left: 8px;
+  cursor: pointer;
+}
+.range-select:hover {
+  border-color: var(--accent);
+}
+
+.hdr-toggle {
+  background: var(--bg-card);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  margin-left: 4px;
+  cursor: pointer;
+}
+.hdr-toggle:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.hdr-toggle.on {
+  background: rgba(88, 166, 255, 0.18);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.header-meta .gen-badge {
+  display: inline-block;
+  background: var(--accent-glow);
+  color: var(--accent);
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  margin-right: 6px;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.status-dot.disconnected {
+  background: var(--red);
+  animation: none;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Metric cards grid */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  transition: background 0.2s, border-color 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.card:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--accent);
+}
+
+.card-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card-value {
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  margin-bottom: 2px;
+}
+
+.card-unit {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-dim);
+  margin-left: 3px;
+}
+
+.card-sub {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  min-height: 12px;
+  line-height: 1.2;
+}
+
+.card canvas {
+  display: block;
+  width: 100%;
+  height: 22px;
+  margin-top: 4px;
+}
+
+/* Color coding for specific metrics */
+.card[data-metric="utilization"] .card-value { color: var(--accent); }
+.card[data-metric="frequency"] .card-value { color: var(--cyan); }
+.card[data-metric="power"] .card-value { color: var(--orange); }
+.card[data-metric="temperature"] .card-value { color: var(--red); }
+.card[data-metric="ddr_bandwidth"] .card-value { color: var(--purple); }
+.card[data-metric="tile_config"] .card-value { color: var(--green); }
+.card[data-metric="memory_used"] .card-value { color: var(--cyan); }
+
+/* Main chart */
+.chart-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.chart-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.chart-legend {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.chart-legend span::before {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.legend-util::before { background: var(--accent); }
+.legend-freq::before { background: var(--cyan); }
+.legend-power::before { background: var(--orange); }
+.legend-temp::before { background: var(--red); }
+
+
+.section-header {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+#cpu-chart, #npu-chart, #gpu-chart {
+  width: 100%;
+  height: 90px;
+  display: block;
+}
+
+/* Warning badges in section headers */
+.warn-badges {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: 10px;
+  vertical-align: middle;
+}
+.warn-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  cursor: default;
+}
+.warn-badge.warning {
+  background: rgba(210, 153, 34, 0.2);
+  color: #d29922;
+  border: 1px solid #d29922;
+}
+.warn-badge.critical {
+  background: rgba(248, 81, 73, 0.25);
+  color: #f85149;
+  border: 1px solid #f85149;
+  animation: warn-pulse 1.5s ease-in-out infinite;
+}
+@keyframes warn-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* Process attribution panels */
+.proc-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+}
+.proc-title {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.proc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.proc-table td, .proc-table th {
+  padding: 2px 6px;
+  text-align: left;
+  vertical-align: middle;
+}
+.proc-table th {
+  color: var(--text-dim);
+  font-weight: 500;
+  font-size: 10px;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+}
+.proc-table .col-busy { width: 100px; }
+.proc-table .col-pid  { width: 50px; color: var(--text-dim); text-align: right; }
+.proc-table .col-mem  { width: 60px; text-align: right; color: var(--text-dim); }
+.proc-table .bar {
+  position: relative;
+  height: 10px;
+  background: #0d1117;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.proc-table .bar-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--accent);
+  width: 0;
+}
+.proc-table tr.proc-empty {
+  visibility: hidden;
+}
+.proc-list {
+  font-size: 11px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.proc-list .proc-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 1px 0;
+}
+.proc-list .proc-pid {
+  color: var(--text-dim);
+}
+
+/* Per-core CPU details */
+.details-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  margin-bottom: 8px;
+  font-family: inherit;
+}
+.details-toggle:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.details-toggle .caret {
+  display: inline-block;
+  transition: transform 0.15s;
+  margin-right: 4px;
+}
+.details-toggle.open .caret {
+  transform: rotate(90deg);
+}
+.details-body {
+  margin-bottom: 12px;
+}
+.cpu-heatmap-wrap {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.cpu-heatmap-title {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+#cpu-heatmap {
+  width: 100%;
+  height: 70px;
+  display: block;
+}
+.cpu-heatmap-legend {
+  display: flex;
+  gap: 14px;
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-top: 6px;
+}
+.cpu-heatmap-legend span::before {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+.cpu-heatmap-legend .lg-p::before { background: #58a6ff; }
+.cpu-heatmap-legend .lg-e::before { background: #3fb950; }
+.cpu-heatmap-legend .lg-lp::before { background: #d29922; }
+#cpu-type-chart {
+  width: 100%;
+  height: 90px;
+  display: block;
+}
+
+.card[data-metric="frequency_actual"] .card-value { color: var(--cyan); }
+
+/* System info panel */
+.info-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.info-section h3 {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--border);
+}
+
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 1px 0;
+  font-size: 10px;
+}
+
+.info-row .value {
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.info-row .label { color: var(--text-dim); }
+.info-row .value { color: var(--text); font-weight: 500; }
+
+/* Loading state */
+.loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 60vh;
+  font-size: 16px;
+  color: var(--text-dim);
+}
+
+.loading .spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 12px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  labels:
+    app: {{ .Release.Name }}
+data:
+  topswatch.yaml: |
+    server:
+      address: "{{ .Values.config.server.address }}"
+      port: {{ .Values.config.server.port }}
+    collector:
+      interval: {{ .Values.config.collector.interval }}
+      history: {{ .Values.config.collector.history }}
+    collectors:
+      cpu:
+        enabled: {{ .Values.config.collectors.cpu.enabled }}
+      gpu:
+        enabled: {{ .Values.config.collectors.gpu.enabled }}
+      npu:
+        enabled: {{ .Values.config.collectors.npu.enabled }}

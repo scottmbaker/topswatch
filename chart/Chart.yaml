@@ -1,0 +1,6 @@
+apiVersion: v2
+name: topswatch
+description: Hardware telemetry monitor for edge AI accelerators
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

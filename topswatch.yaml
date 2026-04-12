@@ -1,0 +1,20 @@
+# topswatch.yaml
+
+# HTTP server settings (used in web/Prometheus mode, the default)
+server:
+  address: "0.0.0.0"
+  port: 9876
+
+# Collection settings
+collector:
+  interval: 1s
+  history: 300
+
+# Collector modules
+collectors:
+  cpu:
+    enabled: true
+  gpu:
+    enabled: true
+  npu:
+    enabled: true

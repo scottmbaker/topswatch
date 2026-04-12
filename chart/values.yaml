@@ -1,0 +1,49 @@
+# -- Container image settings
+image:
+  # -- Image repository (use a local/private registry or pre-import with ctr)
+  repository: topswatch
+  # -- Image tag
+  tag: latest
+  # -- Pull policy (IfNotPresent recommended for locally-imported images)
+  pullPolicy: IfNotPresent
+
+# -- Kubernetes Service settings
+service:
+  # -- Service type (NodePort exposes the UI on every node)
+  type: NodePort
+  # -- Service port (matches the topswatch default)
+  port: 9876
+  # -- Fixed NodePort (set to null to let k8s auto-assign)
+  nodePort: 30987
+
+# -- TopsWatch configuration (rendered into a ConfigMap)
+config:
+  server:
+    # -- Bind address inside the container
+    address: "0.0.0.0"
+    # -- Listening port (should match service.port)
+    port: 9876
+  collector:
+    # -- Poll interval for all modules
+    interval: 1s
+    # -- Number of samples in the short-tier ring buffer
+    history: 300
+  collectors:
+    cpu:
+      # -- Enable CPU metrics (utilization, frequency, power, temperature)
+      enabled: true
+    gpu:
+      # -- Enable GPU metrics (utilization, frequency, power via RAPL uncore)
+      enabled: true
+    npu:
+      # -- Enable NPU metrics (utilization, frequency, power, temperature via PMT)
+      enabled: true
+
+# -- Container resource limits/requests (e.g. {limits: {cpu: 100m, memory: 64Mi}})
+resources: {}
+
+# -- Node selector to constrain which nodes run topswatch
+nodeSelector: {}
+
+# -- Tolerations (e.g. to run on tainted GPU/NPU nodes)
+tolerations: []

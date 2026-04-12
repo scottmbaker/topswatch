@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TopsWatch</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="loading" class="loading">
+  <div class="spinner"></div>
+  Connecting to TopsWatch...
+</div>
+
+<div id="app" style="display:none">
+  <header>
+    <h1>Tops<span>Watch</span></h1>
+    <div class="header-meta">
+      <span class="status-dot" id="status-dot"></span>
+      <span id="status-text">Connected</span>
+      <select id="range-select" class="range-select">
+        <option value="5min">5 min</option>
+        <option value="1h">1 hour</option>
+        <option value="24h">24 hours</option>
+      </select>
+      <button id="toggle-procs" class="hdr-toggle" type="button" title="Show/hide process lists">Procs</button>
+      <button id="toggle-cores" class="hdr-toggle" type="button" title="Show/hide per-core stats">Cores</button>
+      <span class="gen-badge" id="gen-badge"></span>
+    </div>
+  </header>
+
+  <div id="cpu-section" style="display:none">
+    <div class="section-header">CPU<span class="warn-badges" id="cpu-badges"></span></div>
+    <div class="cards" id="cpu-cards"></div>
+    <div id="cpu-procs" class="proc-panel" style="display:none">
+      <div class="proc-title">Top CPU processes</div>
+      <table class="proc-table" id="cpu-procs-table"></table>
+    </div>
+    <div class="chart-panel">
+      <div class="chart-header">
+        <span class="chart-title">CPU Metrics — 5 min</span>
+        <div class="chart-legend">
+          <span class="legend-util">Utilization</span>
+          <span class="legend-freq">Frequency</span>
+          <span class="legend-power">Power</span>
+          <span class="legend-temp">Temperature</span>
+        </div>
+      </div>
+      <canvas id="cpu-chart"></canvas>
+    </div>
+    <div id="cpu-details-wrap" style="display:none">
+      <div id="cpu-details" class="details-body" style="display:none">
+        <div class="cpu-heatmap-wrap">
+          <div class="cpu-heatmap-title">Per-core utilization</div>
+          <canvas id="cpu-heatmap"></canvas>
+          <div id="cpu-heatmap-legend" class="cpu-heatmap-legend"></div>
+        </div>
+        <div class="chart-panel">
+          <div class="chart-header">
+            <span class="chart-title">Per-type average — 5 min</span>
+            <div class="chart-legend" id="cpu-type-legend"></div>
+          </div>
+          <canvas id="cpu-type-chart"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="npu-section" style="display:none">
+    <div class="section-header">NPU<span class="warn-badges" id="npu-badges"></span></div>
+    <div class="cards" id="npu-cards"></div>
+    <div id="npu-procs" class="proc-panel" style="display:none">
+      <div class="proc-title">Processes holding NPU</div>
+      <div id="npu-procs-list" class="proc-list"></div>
+    </div>
+    <div class="chart-panel">
+      <div class="chart-header">
+        <span class="chart-title">NPU Metrics — 5 min</span>
+        <div class="chart-legend">
+          <span class="legend-util">Utilization</span>
+          <span class="legend-freq">Frequency</span>
+          <span class="legend-power">Power</span>
+          <span class="legend-temp">Temperature</span>
+        </div>
+      </div>
+      <canvas id="npu-chart"></canvas>
+    </div>
+  </div>
+
+  <div id="gpu-section" style="display:none">
+    <div class="section-header">GPU<span class="warn-badges" id="gpu-badges"></span></div>
+    <div class="cards" id="gpu-cards"></div>
+    <div id="gpu-procs" class="proc-panel" style="display:none">
+      <div class="proc-title">Top GPU processes</div>
+      <table class="proc-table" id="gpu-procs-table"></table>
+    </div>
+    <div class="chart-panel">
+      <div class="chart-header">
+        <span class="chart-title">GPU Metrics — 5 min</span>
+        <div class="chart-legend">
+          <span class="legend-util">Utilization</span>
+          <span class="legend-freq">Frequency</span>
+          <span class="legend-power">Power</span>
+          <span class="legend-temp">Temperature</span>
+        </div>
+      </div>
+      <canvas id="gpu-chart"></canvas>
+    </div>
+  </div>
+
+  <div class="info-panel">
+    <div class="info-grid" id="info-grid"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
