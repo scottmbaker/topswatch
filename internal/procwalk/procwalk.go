@@ -33,11 +33,24 @@ import (
 // Snapshot is one polling result. It is fully self-contained — the caller
 // can stash, JSON-serialize, or diff it without holding any tracker locks.
 type Snapshot struct {
-	Timestamp time.Time    `json:"timestamp"`
-	GPU       []ProcessGPU `json:"gpu,omitempty"`
-	NPU       []ProcessNPU `json:"npu,omitempty"`
-	CPU       []ProcessCPU `json:"cpu,omitempty"`
+	Timestamp time.Time     `json:"timestamp"`
+	GPU       []ProcessGPU  `json:"gpu,omitempty"`
+	GPUMem    GPUMemSummary `json:"gpu_mem"`
+	NPU       []ProcessNPU  `json:"npu,omitempty"`
+	CPU       []ProcessCPU  `json:"cpu,omitempty"`
 }
+
+// Workload classes for a DRM client, mirroring the C / G / C+G column
+// nvidia-smi shows. The class describes the client, not the memory: the
+// hardware has no separate graphics and compute pools, so "compute
+// memory" means "memory held by clients that do compute work".
+const (
+	ClassCompute         = "compute"
+	ClassGraphics        = "graphics"
+	ClassComputeGraphics = "compute+graphics"
+	ClassVideo           = "video"
+	ClassIdle            = "idle"
+)
 
 // ProcessGPU is one process attributing to a single DRM client (one fd).
 // A single PID may have multiple ProcessGPU entries if it opened the
@@ -45,11 +58,24 @@ type Snapshot struct {
 type ProcessGPU struct {
 	PID         int                `json:"pid"`
 	Comm        string             `json:"comm"`
-	Driver      string             `json:"driver,omitempty"`     // "xe" or "i915"
-	ClientID    string             `json:"client_id,omitempty"`  // drm-client-id
-	GTTBytes    uint64             `json:"gtt_bytes,omitempty"`  // total GTT memory
+	Driver      string             `json:"driver,omitempty"`    // "xe" or "i915"
+	ClientID    string             `json:"client_id,omitempty"` // drm-client-id
+	Class       string             `json:"class,omitempty"`     // one of the Class* constants
+	MemBytes    uint64             `json:"mem_bytes,omitempty"` // all BOs, summed across regions
+	MemResident uint64             `json:"mem_resident_bytes,omitempty"`
 	EngineBusy  map[string]float64 `json:"engine_busy,omitempty"` // engine -> 0..1, since previous sample
 	TotalBusy   float64            `json:"total_busy"`            // sum across engines, clamped to 0..1
+}
+
+// GPUMemSummary aggregates client memory by workload class. Each client
+// lands in exactly one bucket — a client doing both compute and graphics
+// gets its own — so the buckets sum to Total.
+//
+// Buffers shared between clients are counted once per client, so Total
+// can exceed the device's real footprint when clients share BOs.
+type GPUMemSummary struct {
+	ByClass map[string]uint64 `json:"by_class,omitempty"`
+	Total   uint64            `json:"total_bytes"`
 }
 
 // ProcessNPU is one process holding an /dev/accel/* fd. No per-process
@@ -71,8 +97,9 @@ type fdState struct {
 // Sample() from a single goroutine.
 type Tracker struct {
 	mu sync.Mutex
-	// keyed by "<pid>:<fd>" — we lose state if a process exits, which
-	// is fine.
+	// keyed by "<driver>:<drm-client-id>" (falling back to "<pid>:<fd>"
+	// where the driver publishes no client id) — we lose state if a
+	// process exits, which is fine.
 	gpuState map[string]*fdState
 	// keyed by pid for CPU jiffie deltas.
 	cpuState map[int]*cpuPidState
@@ -99,7 +126,8 @@ func (t *Tracker) Sample() Snapshot {
 		return snap
 	}
 
-	// Collect GPU entries by (pid, fd) so we can carry deltas forward.
+	// Collect GPU entries, one per DRM client, so we can carry deltas
+	// forward.
 	type rawGPU struct {
 		pid       int
 		comm      string
@@ -107,6 +135,14 @@ func (t *Tracker) Sample() Snapshot {
 		fdInfoRaw map[string]string
 	}
 	var rawGPUs []rawGPU
+
+	// A process that dup(2)s its device fd — Mesa opens four for a single
+	// GL context — gets one fdinfo per fd, but they all name the same
+	// struct drm_file and so report the same buffer objects. Summing
+	// per-fd would multiply that client's memory by its fd count. The
+	// client id is unique per open, so it is the unit of accounting; the
+	// first fd naming a client wins.
+	seenClients := map[string]bool{}
 
 	// Used to dedupe NPU entries by pid (a process might hold multiple
 	// accel fds, but the user just wants to see the PID once).
@@ -142,6 +178,13 @@ func (t *Tracker) Sample() Snapshot {
 				if _, ok := info["drm-driver"]; !ok {
 					continue
 				}
+				if id := info["drm-client-id"]; id != "" {
+					ck := info["drm-driver"] + ":" + id
+					if seenClients[ck] {
+						continue // another fd onto a client we already counted
+					}
+					seenClients[ck] = true
+				}
 				rawGPUs = append(rawGPUs, rawGPU{
 					pid: pid, comm: comm, fdNum: fdNum, fdInfoRaw: info,
 				})
@@ -156,17 +199,25 @@ func (t *Tracker) Sample() Snapshot {
 	// Compute GPU deltas using prior state.
 	newState := make(map[string]*fdState, len(rawGPUs))
 	for _, r := range rawGPUs {
+		// Key prior-sample state by DRM client, not fd: the client outlives
+		// any single fd, and the dedupe above may pick a different fd for
+		// the same client from one sample to the next.
 		key := fmt.Sprintf("%d:%s", r.pid, r.fdNum)
+		if id := r.fdInfoRaw["drm-client-id"]; id != "" {
+			key = r.fdInfoRaw["drm-driver"] + ":" + id
+		}
 		curCycles, curTotal := parseDrmCycles(r.fdInfoRaw)
-		gtt := parseUintField(r.fdInfoRaw, "drm-total-gtt")
+		mem, resident := parseDrmMemory(r.fdInfoRaw)
 
 		entry := ProcessGPU{
-			PID:        r.pid,
-			Comm:       r.comm,
-			Driver:     r.fdInfoRaw["drm-driver"],
-			ClientID:   r.fdInfoRaw["drm-client-id"],
-			GTTBytes:   gtt,
-			EngineBusy: map[string]float64{},
+			PID:         r.pid,
+			Comm:        r.comm,
+			Driver:      r.fdInfoRaw["drm-driver"],
+			ClientID:    r.fdInfoRaw["drm-client-id"],
+			Class:       classifyClient(curCycles),
+			MemBytes:    mem,
+			MemResident: resident,
+			EngineBusy:  map[string]float64{},
 		}
 
 		var sumBusy float64
@@ -213,6 +264,13 @@ func (t *Tracker) Sample() Snapshot {
 		snap.GPU = append(snap.GPU, entry)
 	}
 	t.gpuState = newState
+
+	// Roll per-client memory up into the by-class split.
+	snap.GPUMem = GPUMemSummary{ByClass: map[string]uint64{}}
+	for _, g := range snap.GPU {
+		snap.GPUMem.ByClass[g.Class] += g.MemBytes
+		snap.GPUMem.Total += g.MemBytes
+	}
 
 	// Sort GPU entries: busy desc, then PID for stability.
 	sort.Slice(snap.GPU, func(i, j int) bool {
@@ -314,6 +372,95 @@ func readFdInfo(pid int, fd string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// engineRole maps a DRM engine name to the workload role it implies. xe
+// publishes the short ring names (rcs/ccs/vcs/vecs); i915 uses the long
+// class names. Both are listed so classification doesn't depend on which
+// driver is loaded.
+//
+// The blitter (bcs/copy) is deliberately absent: compute clients use it
+// to upload weights just as graphics clients use it for transfers, so it
+// carries no signal about what kind of client this is.
+var engineRole = map[string]string{
+	"rcs":           ClassGraphics,
+	"render":        ClassGraphics,
+	"ccs":           ClassCompute,
+	"compute":       ClassCompute,
+	"vcs":           ClassVideo,
+	"video":         ClassVideo,
+	"vecs":          ClassVideo,
+	"video-enhance": ClassVideo,
+}
+
+// roleThreshold is the share of a client's engine cycles a role must
+// account for before it counts toward the client's class.
+//
+// Mesa dispatches a trickle of compute work on behalf of an otherwise
+// pure graphics context: a surfaceless GLES client measured 288 compute
+// cycles against 560 million render cycles. Treating any non-zero count
+// as significant would label every graphics client compute+graphics and
+// file its memory under the wrong bucket.
+const roleThreshold = 0.01
+
+// classifyClient labels a DRM client by the engines it has ever used.
+//
+// The cycle counters are cumulative over the life of the client, not
+// per-sample deltas, so the label is sticky: an LLM sitting idle between
+// requests keeps its "compute" class instead of decaying to "idle". Only
+// a client that has never run anything is ClassIdle. The flip side is
+// that a client which changes character mid-life keeps its old label
+// until the new work outweighs the old.
+func classifyClient(cycles map[string]uint64) string {
+	byRole := map[string]uint64{}
+	var total uint64
+	for eng, n := range cycles {
+		role := engineRole[eng]
+		if role == "" || n == 0 {
+			continue // unknown engine, or the blitter, which tells us nothing
+		}
+		byRole[role] += n
+		total += n
+	}
+	if total == 0 {
+		return ClassIdle
+	}
+	significant := func(role string) bool {
+		return float64(byRole[role])/float64(total) >= roleThreshold
+	}
+	compute, graphics, video := significant(ClassCompute), significant(ClassGraphics), significant(ClassVideo)
+	switch {
+	case compute && graphics:
+		return ClassComputeGraphics
+	case compute:
+		return ClassCompute
+	case graphics:
+		return ClassGraphics
+	case video:
+		return ClassVideo
+	}
+	return ClassIdle
+}
+
+// parseDrmMemory sums the per-region memory keys published by the DRM
+// core (drm-total-<region> and drm-resident-<region>, e.g. region "gtt"
+// or "system"). Each buffer object is accounted to exactly one region,
+// so summing across regions yields the client's whole footprint.
+//
+// Note "drm-total-cycles-<engine>" shares the drm-total- prefix and must
+// not be mistaken for a memory region.
+func parseDrmMemory(info map[string]string) (total, resident uint64) {
+	for k := range info {
+		switch {
+		case strings.HasPrefix(k, "drm-total-cycles-"):
+			continue
+		case strings.HasPrefix(k, "drm-total-"):
+			total += parseUintField(info, k)
+		case strings.HasPrefix(k, "drm-resident-"):
+			resident += parseUintField(info, k)
+		}
+	}
+	return total, resident
 }
 
 // parseDrmCycles extracts every drm-cycles-<engine> and drm-total-cycles-<engine>

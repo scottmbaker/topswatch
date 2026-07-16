@@ -77,11 +77,43 @@ func (c *Collector) CollectOnce() Sample {
 	}
 	if c.procs != nil {
 		s.Processes = c.procs.Sample()
+		if _, ok := s.Metrics["gpu"]; ok {
+			s.Metrics["gpu"] = append(s.Metrics["gpu"], gpuMemoryMetrics(s.Processes)...)
+		}
 	}
 	if c.warnings != nil {
 		s.Warnings = c.warnings.Evaluate(s)
 	}
 	return s
+}
+
+// gpuMemoryMetrics turns the per-client memory split from the process
+// walk into gpu module gauges, so it reaches history, the dashboard and
+// Prometheus by the same path as every other metric. It lives here
+// rather than in the gpu module because only the collector sees both the
+// module output and the process walk.
+//
+// Every class is emitted on every sample, including empty ones: a class
+// that stopped being reported would leave its last value frozen in the
+// dashboard's history instead of dropping to zero.
+func gpuMemoryMetrics(snap procwalk.Snapshot) []module.Metric {
+	classes := []string{
+		procwalk.ClassCompute,
+		procwalk.ClassGraphics,
+		procwalk.ClassComputeGraphics,
+		procwalk.ClassVideo,
+		procwalk.ClassIdle,
+	}
+	out := make([]module.Metric, 0, len(classes))
+	for _, c := range classes {
+		out = append(out, module.Metric{
+			Name:   "memory_used",
+			Value:  float64(snap.GPUMem.ByClass[c]),
+			Unit:   "bytes",
+			Labels: map[string]string{"class": c},
+		})
+	}
+	return out
 }
 
 // Start begins the periodic collection loop.

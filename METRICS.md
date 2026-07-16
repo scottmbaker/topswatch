@@ -116,6 +116,11 @@ In the paths below, `<card>` is the discovered DRM card (e.g. `card0`) and
 - **Unit:** %
 - **Description:** Per-engine busy fraction. One time series per engine, distinguished by the `engine` label (e.g. `rcs0`, `bcs0`, `vcs0`, `vecs0`, or whatever engines the kernel exposes for the detected GPU).
 
+### `topswatch_gpu_memory_used_bytes`
+- **Source:** `/proc/<pid>/fdinfo/<fd>` for every open `/dev/dri/*` client. Memory is the sum of the per-region `drm-total-<region>` keys; the workload class comes from the client's cumulative `drm-cycles-<engine>` counters (`ccs` → compute, `rcs` → graphics, `vcs`/`vecs` → video; `bcs` carries no signal and is ignored). Clients are deduped by `drm-client-id`, since a process that `dup(2)`s its device fd reports the same buffers once per fd.
+- **Unit:** bytes
+- **Description:** GPU memory held by DRM clients, grouped by the `class` label: `compute`, `graphics`, `compute+graphics`, `video`, or `idle`. One series per class is emitted on every sample, zero included, so a class going quiet reads as 0 rather than a frozen last value; sum across the label for the device total. This is the Intel analogue of `nvidia-smi`'s per-process memory plus its `C`/`G`/`C+G` type column — the class describes the client, not the pages, as the hardware has no separate graphics and compute pools. On an integrated GPU there is no VRAM, so this is system RAM the GPU has mapped. See `evidence/gpu_memory_used_bytes.md`.
+
 ### `topswatch_gpu_frequency_actual_mhz`
 - **Source:**
   - Xe: `/sys/class/drm/<card>/device/tile*/gt*/freq0/act_freq`

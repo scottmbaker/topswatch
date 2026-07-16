@@ -21,27 +21,31 @@ import (
 // --- Theme (mirrors style.css) ---
 
 var (
-	cBg       = color.RGBA{0x0d, 0x11, 0x17, 0xff}
-	cBgCard   = color.RGBA{0x16, 0x1b, 0x22, 0xff}
-	cBorder   = color.RGBA{0x30, 0x36, 0x3d, 0xff}
-	cText     = color.RGBA{0xe6, 0xed, 0xf3, 0xff}
-	cTextDim  = color.RGBA{0x8b, 0x94, 0x9e, 0xff}
-	cAccent   = color.RGBA{0x58, 0xa6, 0xff, 0xff}
-	cCyan     = color.RGBA{0x39, 0xd2, 0xc0, 0xff}
-	cOrange   = color.RGBA{0xd2, 0x99, 0x22, 0xff}
-	cRed      = color.RGBA{0xf8, 0x51, 0x49, 0xff}
-	cPurple   = color.RGBA{0xbc, 0x8c, 0xff, 0xff}
+	cBg      = color.RGBA{0x0d, 0x11, 0x17, 0xff}
+	cBgCard  = color.RGBA{0x16, 0x1b, 0x22, 0xff}
+	cBorder  = color.RGBA{0x30, 0x36, 0x3d, 0xff}
+	cText    = color.RGBA{0xe6, 0xed, 0xf3, 0xff}
+	cTextDim = color.RGBA{0x8b, 0x94, 0x9e, 0xff}
+	cAccent  = color.RGBA{0x58, 0xa6, 0xff, 0xff}
+	cCyan    = color.RGBA{0x39, 0xd2, 0xc0, 0xff}
+	cOrange  = color.RGBA{0xd2, 0x99, 0x22, 0xff}
+	cRed     = color.RGBA{0xf8, 0x51, 0x49, 0xff}
+	cPurple  = color.RGBA{0xbc, 0x8c, 0xff, 0xff}
 )
 
 // --- Metric definitions (mirrors app.js) ---
 
 type snapMetric struct {
-	key       string
-	label     string
-	unit      string
-	color     color.RGBA
-	prec      int
-	max       float64 // 0 = autoscale
+	key   string
+	label string
+	unit  string
+	color color.RGBA
+	prec  int
+	max   float64 // 0 = autoscale
+	// aggregate sums every metric sharing key, labels included, instead of
+	// taking the single unlabeled one — for metrics that exist only as a
+	// labeled split (gpu memory_used, one per workload class).
+	aggregate bool
 	transform func(float64) float64
 }
 
@@ -65,6 +69,8 @@ var snapDefs = map[string][]snapMetric{
 		{key: "frequency_actual", label: "FREQ", unit: "MHz", color: cCyan, prec: 0},
 		{key: "power", label: "POWER", unit: "W", color: cOrange, prec: 2},
 		{key: "temperature", label: "TEMP", unit: "C", color: cRed, prec: 0},
+		{key: "memory_used", label: "MEM", unit: "GB", color: cPurple, prec: 2, aggregate: true,
+			transform: func(v float64) float64 { return v / (1024 * 1024 * 1024) }},
 	},
 }
 
@@ -173,7 +179,7 @@ func drawCard(c *snapCanvas, x, y, w, h int, def snapMetric, mod string, hist []
 	c.text(x+8, y+12, def.label, cTextDim)
 
 	// Value
-	last, ok := lastMetricValue(hist, mod, def.key)
+	last, ok := lastMetricValue(hist, mod, def)
 	if def.transform != nil && ok {
 		last = def.transform(last)
 	}
@@ -195,7 +201,7 @@ func drawCard(c *snapCanvas, x, y, w, h int, def snapMetric, mod string, hist []
 }
 
 func drawSparkline(c *snapCanvas, x, y, w, h int, mod string, def snapMetric, hist []collector.Sample, n int) {
-	pts := metricSeries(hist, mod, def.key, def.transform)
+	pts := metricSeries(hist, mod, def)
 	if len(pts) > n {
 		pts = pts[len(pts)-n:]
 	}
@@ -246,11 +252,13 @@ func drawChart(c *snapCanvas, x, y, w, h int, mod string, hist []collector.Sampl
 	// Each metric in module
 	defs := snapDefs[mod]
 	for _, def := range defs {
-		// Skip non-chart-friendly entries
-		if def.key == "ddr_bandwidth" || strings.HasPrefix(def.key, "frequency_min") || strings.HasPrefix(def.key, "frequency_max") {
+		// Card-only metrics: their scales have nothing to do with the
+		// util/freq/power/temp lines.
+		if def.key == "ddr_bandwidth" || def.key == "memory_used" ||
+			strings.HasPrefix(def.key, "frequency_min") || strings.HasPrefix(def.key, "frequency_max") {
 			continue
 		}
-		pts := metricSeries(hist, mod, def.key, def.transform)
+		pts := metricSeries(hist, mod, def)
 		if len(pts) > 300 {
 			pts = pts[len(pts)-300:]
 		}
@@ -328,37 +336,52 @@ func drawInfoRow(c *snapCanvas, x, y, w int, label, value string) {
 
 // --- Helpers ---
 
-// lastMetricValue returns the most recent unlabeled metric value matching
-// (mod, key). Labeled metrics (per-core CPU, per-engine GPU, etc.) are
-// skipped because the snapshot only renders aggregates.
-func lastMetricValue(hist []collector.Sample, mod, key string) (float64, bool) {
-	for i := len(hist) - 1; i >= 0; i-- {
-		for _, m := range hist[i].Metrics[mod] {
-			if m.Name == key && len(m.Labels) == 0 {
+// sampleMetricValue returns the value for (mod, key) within one sample.
+// Labeled metrics (per-core CPU, per-engine GPU, etc.) are skipped
+// because the snapshot only renders aggregates — unless the def asks for
+// them to be summed, which is how a labeled family yields a total.
+func sampleMetricValue(s collector.Sample, mod string, def snapMetric) (float64, bool) {
+	var sum float64
+	var found bool
+	for _, m := range s.Metrics[mod] {
+		if m.Name != def.key {
+			continue
+		}
+		if !def.aggregate {
+			if len(m.Labels) == 0 {
 				return m.Value, true
 			}
+			continue
+		}
+		sum += m.Value
+		found = true
+	}
+	return sum, found
+}
+
+// lastMetricValue returns the most recent value matching (mod, def).
+func lastMetricValue(hist []collector.Sample, mod string, def snapMetric) (float64, bool) {
+	for i := len(hist) - 1; i >= 0; i-- {
+		if v, ok := sampleMetricValue(hist[i], mod, def); ok {
+			return v, true
 		}
 	}
 	return 0, false
 }
 
-// metricSeries returns the chronological sequence of unlabeled values for
-// (mod, key) across the history. See lastMetricValue for the labeled-skip
-// rationale.
-func metricSeries(hist []collector.Sample, mod, key string, transform func(float64) float64) []float64 {
+// metricSeries returns the chronological sequence of values for
+// (mod, def) across the history.
+func metricSeries(hist []collector.Sample, mod string, def snapMetric) []float64 {
 	out := make([]float64, 0, len(hist))
 	for _, s := range hist {
-		for _, m := range s.Metrics[mod] {
-			if m.Name != key || len(m.Labels) != 0 {
-				continue
-			}
-			v := m.Value
-			if transform != nil {
-				v = transform(v)
-			}
-			out = append(out, v)
-			break
+		v, ok := sampleMetricValue(s, mod, def)
+		if !ok {
+			continue
 		}
+		if def.transform != nil {
+			v = def.transform(v)
+		}
+		out = append(out, v)
 	}
 	return out
 }
@@ -507,4 +530,3 @@ func abs(x int) int {
 	}
 	return x
 }
-

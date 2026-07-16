@@ -326,6 +326,7 @@ header h1 span {
 .proc-table .col-busy { width: 100px; }
 .proc-table .col-pid  { width: 50px; color: var(--text-dim); text-align: right; }
 .proc-table .col-mem  { width: 60px; text-align: right; color: var(--text-dim); }
+.proc-table .col-type { width: 38px; text-align: center; color: var(--text-dim); }
 .proc-table .bar {
   position: relative;
   height: 10px;

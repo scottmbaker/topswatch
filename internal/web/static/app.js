@@ -79,15 +79,44 @@
     { key: 'memory_total_gb', srcKey: 'memory_total', hidden: true, transform: function(v) { return v / (1024*1024*1024); } },
   ];
 
+  function bytesToGB(v) { return v / (1024 * 1024 * 1024); }
+
+  // The per-class series behind the Memory card's subtitle. Order is the
+  // display order; the badges match the Type column in the process table.
+  const gpuMemClasses = [
+    { key: 'memory_compute_gb',  cls: 'compute',          badge: 'C' },
+    { key: 'memory_graphics_gb', cls: 'graphics',         badge: 'G' },
+    { key: 'memory_cg_gb',       cls: 'compute+graphics', badge: 'C+G' },
+    { key: 'memory_video_gb',    cls: 'video',            badge: 'V' },
+    { key: 'memory_idle_gb',     cls: 'idle',             badge: 'idle' },
+  ];
+
+  // "0.11 C \u00b7 0.07 G" \u2014 only classes actually holding memory.
+  function gpuMemSubtitle() {
+    var parts = [];
+    for (var i = 0; i < gpuMemClasses.length; i++) {
+      var arr = (history.gpu && history.gpu[gpuMemClasses[i].key]) || [];
+      if (arr.length === 0) continue;
+      var v = arr[arr.length - 1].v;
+      if (v <= 0) continue;
+      parts.push(v.toFixed(2) + ' ' + gpuMemClasses[i].badge);
+    }
+    return parts.join('  \u00b7  ');
+  }
+
   const gpuMetricDefs = [
     { key: 'utilization',         label: 'Utilization',      unit: '%',   precision: 1, color: '#58a6ff', max: 100 },
     { key: 'frequency_actual',    label: 'Freq (actual)',    unit: 'MHz', precision: 0, color: '#39d2c0' },
     { key: 'frequency_requested', label: 'Freq (requested)', unit: 'MHz', precision: 0, color: '#58a6ff' },
     { key: 'power',               label: 'Power',            unit: 'W',   precision: 2, color: '#d29922' },
     { key: 'temperature',         label: 'Temperature',      unit: '\u00b0C', precision: 0, color: '#f85149' },
-    { key: 'frequency_min',       label: 'Freq (min)',       unit: 'MHz', precision: 0, color: '#8b949e' },
+    { key: 'memory_used_gb',      label: 'Memory',           unit: 'GB',  precision: 2, color: '#bc8cff',
+      srcKey: 'memory_used', aggregate: true, transform: bytesToGB, subtitleFn: gpuMemSubtitle },
     { key: 'frequency_max',       label: 'Freq (max)',       unit: 'MHz', precision: 0, color: '#8b949e' },
-  ];
+  ].concat(gpuMemClasses.map(function(c) {
+    return { key: c.key, srcKey: 'memory_used', labels: { class: c.cls },
+             hidden: true, transform: bytesToGB };
+  }));
 
   const cpuChartSeries = [
     { key: 'utilization', color: '#58a6ff', min: 0 },
@@ -282,6 +311,17 @@
     }
   }
 
+  // Pinning labels is what lets several metrics that share a name
+  // (memory_used, one per workload class) feed separate series.
+  function metricMatches(m, srcName, labels) {
+    if (m.name !== srcName) return false;
+    if (!labels) return true;
+    for (var k in labels) {
+      if (!m.labels || m.labels[k] !== labels[k]) return false;
+    }
+    return true;
+  }
+
   function pushModuleMetrics(mod, defs, metrics, t) {
     if (!history[mod]) history[mod] = {};
     metrics = metrics || [];
@@ -289,12 +329,14 @@
       var def = defs[i];
       if (!history[mod][def.key]) history[mod][def.key] = [];
       var srcName = def.srcKey || def.key;
-      var m = null;
+      var raw = null;
       for (var j = 0; j < metrics.length; j++) {
-        if (metrics[j].name === srcName) { m = metrics[j]; break; }
+        if (!metricMatches(metrics[j], srcName, def.labels)) continue;
+        raw = (raw === null ? 0 : raw) + metrics[j].value;
+        if (!def.aggregate) break;
       }
-      if (m) {
-        var v = m.value;
+      if (raw !== null) {
+        var v = raw;
         if (def.transform) v = def.transform(v);
         history[mod][def.key].push({ t: t, v: v });
       }
@@ -627,7 +669,7 @@
   var PROC_ROWS = 4;
   var STICKY_TICKS = 8; // ~8 seconds at 1Hz collection
   var stickyCPU = []; // [{pid, comm, cpu_percent, rss_bytes, ttl}]
-  var stickyGPU = []; // [{pid, comm, total_busy, gtt_bytes, ttl}]
+  var stickyGPU = []; // [{pid, comm, total_busy, mem_bytes, class, ttl}]
 
   function mergeSticky(sticky, fresh, valueKey, fields) {
     // Index sticky entries by pid for in-place updates.
@@ -710,6 +752,27 @@
     table.innerHTML = html;
   }
 
+  // Short badges for the workload class, matching the C / G / C+G column
+  // nvidia-smi shows.
+  var CLASS_LABEL = {
+    'compute':          'C',
+    'graphics':         'G',
+    'compute+graphics': 'C+G',
+    'video':            'V',
+    'idle':             '—'
+  };
+
+  // Fold two clients' classes together when one PID holds several.
+  function combineClass(a, b) {
+    if (!a || a === 'idle') return b || 'idle';
+    if (!b || b === 'idle') return a;
+    if (a === b) return a;
+    var hasCompute  = a.indexOf('compute')  >= 0 || b.indexOf('compute')  >= 0;
+    var hasGraphics = a.indexOf('graphics') >= 0 || b.indexOf('graphics') >= 0;
+    if (hasCompute && hasGraphics) return 'compute+graphics';
+    return hasCompute ? 'compute' : (hasGraphics ? 'graphics' : a);
+  }
+
   function feedGPUSticky(list) {
     // Aggregate by PID (a process may hold several DRM clients).
     var byPid = {};
@@ -717,15 +780,17 @@
       var p = list[i];
       var k = p.pid;
       if (!byPid[k]) {
-        byPid[k] = { pid: p.pid, comm: p.comm, total_busy: 0, gtt_bytes: 0 };
+        byPid[k] = { pid: p.pid, comm: p.comm, total_busy: 0, mem_bytes: 0, class: 'idle' };
       }
       byPid[k].total_busy += p.total_busy || 0;
-      byPid[k].gtt_bytes += p.gtt_bytes || 0;
+      byPid[k].mem_bytes += p.mem_bytes || 0;
+      byPid[k].class = combineClass(byPid[k].class, p.class);
     }
     var fresh = Object.values(byPid);
     stickyGPU = mergeSticky(stickyGPU, fresh, 'total_busy', {
       total_busy: 'total_busy',
-      gtt_bytes:  'gtt_bytes'
+      mem_bytes:  'mem_bytes',
+      class:      'class'
     });
   }
 
@@ -734,8 +799,9 @@
     var html = '<thead><tr>'
       + '<th>Process</th>'
       + '<th class="col-pid">PID</th>'
+      + '<th class="col-type">Type</th>'
       + '<th class="col-busy">Busy</th>'
-      + '<th class="col-mem">GTT</th>'
+      + '<th class="col-mem">Mem</th>'
       + '</tr></thead><tbody>';
     for (var j = 0; j < PROC_ROWS; j++) {
       var r = stickyGPU[j];
@@ -745,14 +811,16 @@
         html += '<tr' + fade + '>'
           + '<td>' + escapeHTML(r.comm || '?') + '</td>'
           + '<td class="col-pid">' + r.pid + '</td>'
+          + '<td class="col-type">' + escapeHTML(CLASS_LABEL[r.class] || '—') + '</td>'
           + '<td class="col-busy">'
           +   '<div class="bar"><div class="bar-fill" style="width:' + pct.toFixed(1) + '%"></div></div>'
           +   '<div style="font-size:10px;color:#8b949e">' + pct.toFixed(0) + '%</div>'
           + '</td>'
-          + '<td class="col-mem">' + formatBytes(r.gtt_bytes || 0) + '</td>'
+          + '<td class="col-mem">' + formatBytes(r.mem_bytes || 0) + '</td>'
           + '</tr>';
       } else {
         html += '<tr class="proc-empty"><td>&nbsp;</td><td class="col-pid"></td>'
+          + '<td class="col-type"></td>'
           + '<td class="col-busy"><div class="bar"></div></td>'
           + '<td class="col-mem"></td></tr>';
       }
