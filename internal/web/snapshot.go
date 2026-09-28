@@ -76,6 +76,10 @@ var snapDefs = map[string][]snapMetric{
 
 var snapModuleOrder = []string{"cpu", "npu", "gpu"}
 
+// snapNow is the clock used for the header timestamp. Tests override it so
+// the rendered image is deterministic.
+var snapNow = time.Now
+
 // --- HTTP handler ---
 
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -123,7 +127,7 @@ func renderSnapshot(devices map[string]module.DeviceInfo, hist []collector.Sampl
 
 	// --- Header ---
 	c.bigText(snapPad, snapPad, "TopsWatch", cAccent, 2)
-	subtitle := time.Now().Format("2006-01-02 15:04:05")
+	subtitle := snapNow().Format("2006-01-02 15:04:05")
 	if len(hist) > 0 {
 		samples := len(hist)
 		subtitle += fmt.Sprintf("   |   %d samples", samples)

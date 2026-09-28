@@ -1,0 +1,44 @@
+TopsWatch
+
+CPU
+  Model:           Intel(R) Core(TM) Ultra 5 335
+  Vendor:          GenuineIntel
+  Cores:           8 physical, 8 threads
+  Arch:            x86_64
+
+  Utilization:     10.03 %
+  Cores Busy:      0.802 cores
+  Frequency:       2460 MHz
+  Power:           15.42 W
+  Temperature:     57.47 C
+
+GPU
+  Device:          Intel Arc Graphics (8086:b0a0)
+  Driver:          xe
+
+  Utilization:     14.96 %
+  Freq (actual):   977.1 MHz
+  Freq (requested): 1077 MHz
+  Freq (min):      300 MHz
+  Freq (max):      2350 MHz
+  Freq (RP0 max):  2350 MHz
+  Freq (RPe eff):  900 MHz
+  Freq (RPn min):  300 MHz
+  Power:           11.29 W
+  Temperature:     49.19 C
+
+NPU
+  Device:          Intel NPU 5720 (8086:b03e)
+  Driver:          intel_vpu 1.19.0
+  Firmware:        20260701*MTL_CLIENT_SILICON-release
+
+  Utilization:     7.053 %
+  Frequency:       500.7 MHz
+  Power:           0.801 W
+  Temperature:     50.34 C
+  DDR Bandwidth:   1705 MB/s
+  Tile Config:     6
+  Memory Used:     513.9 MiB
+  Memory Total:    2.00 GiB
+  Memory %:        27.56 %
+
