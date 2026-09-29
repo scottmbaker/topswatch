@@ -14,6 +14,7 @@ import (
 	"github.com/scottmbaker/topswatch/internal/config"
 	"github.com/scottmbaker/topswatch/internal/module"
 	"github.com/scottmbaker/topswatch/internal/textout"
+	"github.com/scottmbaker/topswatch/internal/tui"
 	"github.com/scottmbaker/topswatch/internal/web"
 )
 
@@ -23,7 +24,19 @@ func main() {
 	address := flag.String("address", "", "override server bind address")
 	port := flag.Int("port", 0, "override server port")
 	interval := flag.Duration("interval", 0, "override poll interval")
+	tuiMode := flag.Bool("tui", false, "terminal dashboard attached to a running daemon, then exit")
+	connect := flag.String("connect", "", "daemon address for --tui (host, host:port, [v6]:port, or URL; default localhost:9876)")
+	refresh := flag.Duration("refresh", 0, "viewer refresh interval for --tui; 0 follows the daemon's own sample stream")
 	flag.Parse()
+
+	// Viewer mode needs no hardware access or config: it is a client of a
+	// daemon that is already running (locally by default).
+	if *tuiMode {
+		if err := tui.Run(tui.Options{Addr: *connect, Refresh: *refresh}); err != nil {
+			log.Fatalf("[tui] %v", err)
+		}
+		return
+	}
 
 	// Load config
 	cfg, err := config.Load(*configPath)

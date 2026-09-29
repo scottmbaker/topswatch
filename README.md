@@ -10,7 +10,16 @@ from sysfs, hwmon, Intel PMT, RAPL, and `perf_event_open`.
 
 The monitor exports a web UI that may be consumed directly, and it also
 exports a Prometheus endpoint that may be used with the typical Prometheus
-and Grafana monitoring stack.
+and Grafana monitoring stack. For lighter-weight viewing there is a
+terminal dashboard (`--tui`, works over SSH) and a small desktop viewer
+(`topswatch-gui`); both attach to a running daemon, locally or remotely.
+See [Viewers](#viewers).
+
+![topswatch-gui showing the CPU, NPU and GPU dashboard on a Panther Lake device](docs/images/topswatch-gui.png)
+
+*The desktop viewer on a Core Ultra 5 335. The web UI shows the same
+cards and charts plus per-core, per-engine and process detail; the
+terminal viewer shows them in text (see [Viewers](#viewers)).*
 
 Despite the name, TopsWatch doesn't actually monitor TOPS. It monitors
 the behavior of hardware. AI thought TopsWatch would be a catchy name,
@@ -84,9 +93,174 @@ make build
 ./topswatch --port 8080
 ```
 
+
+## Viewers
+
+TopsWatch has four ways to look at the data. The daemon collects once;
+every viewer attaches to it.
+
+| Viewer | Where it runs | Needs | Best for |
+|---|---|---|---|
+| Web UI (`/`) | any browser | nothing extra | full dashboard: per-core, per-engine, processes, warnings |
+| Terminal `--tui` | any terminal, incl. SSH | the `topswatch` binary | remote shells, headless devices, low overhead |
+| Desktop `topswatch-gui` | Ubuntu Desktop (X11/Wayland) | separately built binary | a small always-on window on the device itself |
+| `--text` | any terminal | the `topswatch` binary | one-shot readout, scripts |
+
+The TUI and GUI are **clients**: they read the daemon's HTTP API and never
+touch hardware, so they need no root, no config file, and no special
+permissions. They default to `localhost:9876` and take `--connect` for
+another host.
+
+### Viewer overhead
+
+Measured on a Core Ultra 5 335 (Panther Lake) running Ubuntu 24.04 with
+the daemon at its default 1s interval. Numbers are the **extra** CPU each
+viewer adds to the machine, as a percentage of one core, including what
+it costs the daemon and the display stack. The daemon alone uses about
+2.8%.
+
+| Viewer | Added CPU | Notes |
+|---|---|---|
+| Terminal `--tui` over SSH | ~2% | 1.3% streaming, 0.9% with `--refresh 5s` |
+| Terminal `--tui` in a desktop terminal window | ~2.5% | terminal emulator and compositor add under 1% |
+| Desktop `topswatch-gui` | ~4.5% at 1s, ~2.5% at 5s | the difference is the daemon rendering a JPEG per fetch |
+| Web UI in Firefox | ~40% | browser 18%, Xorg 14%, compositor 5% |
+
+Full tables, method and caveats are in [VIEWERS.md](VIEWERS.md).
+
+### Terminal viewer (`--tui`)
+
+![topswatch --tui in a 120x40 terminal](docs/images/topswatch-tui.png)
+
+Built into the daemon binary. Start a daemon first (as root, since RAPL,
+PMT and perf need it), then attach from any terminal:
+
+```bash
+sudo ./topswatch                 # daemon, in one shell or as a service
+./topswatch --tui                # viewer, in another shell or over SSH
+```
+
+Flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--connect ADDR` | `localhost:9876` | daemon to attach to: `host`, `host:port`, `[v6addr]:port`, or `http://…` |
+| `--refresh N` | `0` (stream) | `0` follows the daemon's SSE stream and redraws once per sample; `N` (e.g. `5s`) polls instead, for a slower, cheaper display |
+
+Keys: `q` quit · `r` cycle history range (5min / 1h / 24h) · `p` pause.
+
+The layout adapts to the terminal: 40 rows or more shows cards, sparklines
+and a braille chart per module; below about 20 rows the charts are
+dropped and only the cards remain. Colours need a 256-colour terminal
+(`TERM=xterm-256color` is typical).
+
+Examples:
+
+```bash
+# Over SSH, on the device
+ssh user@device ./topswatch --tui
+
+# From your laptop, against a remote daemon (the binary runs anywhere Go does)
+./topswatch --tui --connect device.local
+
+# IPv6 literal and a slower poll
+./topswatch --tui --connect '[fe80::1%eth0]:9876' --refresh 5s
+```
+
+If the daemon is not reachable the TUI shows the error in its footer and
+keeps retrying; it fills in as soon as the daemon answers.
+
+### Desktop viewer (`topswatch-gui`)
+
+A small window that shows the daemon's own rendered dashboard
+(`/snapshot.jpg`) and refreshes it on a timer. It has no rendering logic
+of its own, so it always matches the web snapshot. It is a separate
+binary built with a build tag, because the Fyne toolkit needs cgo and
+OpenGL/X11 headers; the daemon binary stays static and dependency-free.
+
+```bash
+# Build once, on a machine with a desktop toolchain (Ubuntu/Debian)
+sudo apt install gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
+make gui                                  # produces ./topswatch-gui
+
+# Run
+./topswatch-gui                           # local daemon, 1s refresh
+./topswatch-gui --connect device.local --refresh 2s
+```
+
+The default build supports both X11 and Wayland sessions, which is why
+it needs the Wayland headers even on an X11 desktop. If you would rather
+not install those, build the X11-only variant:
+
+```bash
+sudo apt install gcc libgl1-mesa-dev xorg-dev
+make gui GUI_TAGS="gui x11"
+```
+
+Flags are `--connect` (as above) and `--refresh` (default `1s`). `q` or
+`Escape` closes the window. The status bar shows the daemon address, the
+time of the last update, and any connection error.
+
+### Using the viewers with the Docker deployment
+
+The container image contains only the `topswatch` binary (no shell, no
+GUI). There are two ways to use the TUI with it.
+
+**Run the TUI inside the running container.** Give the container a name
+when you start it, then `exec` the same binary in viewer mode. It attaches
+to the daemon over the container's own loopback:
+
+```bash
+docker run -d --name topswatch --privileged --pid=host \
+  -v /sys:/sys:rw -v /proc:/proc:ro -p 9876:9876 topswatch
+
+docker exec -it -e TERM=xterm-256color topswatch /topswatch --tui
+```
+
+`-it` gives the TUI a terminal and `-e TERM` gives it colours; `-e
+COLUMNS`/`-e LINES` are not needed, the size is taken from your terminal.
+
+**Run a viewer on the host (or anywhere) against the published port.**
+Build or download the `topswatch` binary on the host and point it at the
+port you published with `-p`:
+
+```bash
+./topswatch --tui --connect localhost:9876
+./topswatch-gui --connect localhost:9876
+```
+
+This is the only way to use the desktop viewer with Docker, since the
+image cannot open a window. With `--net-host` (as in the `ctr` example
+below) the daemon is on the host's `9876` directly and the same commands
+apply.
+
+### Using the viewers with the Helm chart
+
+The DaemonSet exposes the daemon on every node at the NodePort (default
+`30987`), so from any machine that can reach a node:
+
+```bash
+./topswatch --tui --connect node-1.example:30987
+./topswatch-gui --connect node-1.example:30987
+```
+
+Or forward a pod's port and use a viewer on your own machine:
+
+```bash
+kubectl port-forward ds/topswatch 9876:9876
+./topswatch --tui            # or ./topswatch-gui
+```
+
+You can also `kubectl exec -it <pod> -- /topswatch --tui` to run the TUI
+inside a pod. `kubectl exec` does not pass your `TERM` through and the
+distroless image has no way to set it, so expect a monochrome display
+that way; `port-forward` gives the full-colour one.
+
 ## Output Modes
 
 - **`--text`** — Collect metrics twice (1s apart for deltas), print to stdout, exit.
+- **`--tui`** — Terminal dashboard attached to a running daemon
+  (`--connect`, `--refresh`); collects nothing itself. See [Viewers](#viewers).
 - **Default** (no flags) — Start HTTP server with web dashboard, JSON API,
   SSE stream, and Prometheus endpoint.
 
@@ -124,7 +298,8 @@ collectors:
 ```
 
 All config values can be overridden via CLI flags (`--address`, `--port`,
-`--interval`).
+`--interval`). Viewer modes (`--tui`, `topswatch-gui`) do not read the
+config file; they take `--connect` and `--refresh` only.
 
 ## Supported Platforms
 
@@ -150,11 +325,14 @@ Build and run with Docker:
 
 ```bash
 make docker
-docker run --privileged --pid=host \
+docker run --name topswatch --privileged --pid=host \
   -v /sys:/sys:rw \
   -v /proc:/proc:ro \
   -p 9876:9876 topswatch
 ```
+
+To view from a terminal while it runs, see
+[Using the viewers with the Docker deployment](#using-the-viewers-with-the-docker-deployment).
 
 The container needs host access to:
 

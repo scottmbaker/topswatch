@@ -15,6 +15,7 @@ import (
 	"golang.org/x/image/math/fixed"
 
 	"github.com/scottmbaker/topswatch/internal/collector"
+	"github.com/scottmbaker/topswatch/internal/metricdef"
 	"github.com/scottmbaker/topswatch/internal/module"
 )
 
@@ -27,54 +28,26 @@ var (
 	cText    = color.RGBA{0xe6, 0xed, 0xf3, 0xff}
 	cTextDim = color.RGBA{0x8b, 0x94, 0x9e, 0xff}
 	cAccent  = color.RGBA{0x58, 0xa6, 0xff, 0xff}
-	cCyan    = color.RGBA{0x39, 0xd2, 0xc0, 0xff}
-	cOrange  = color.RGBA{0xd2, 0x99, 0x22, 0xff}
-	cRed     = color.RGBA{0xf8, 0x51, 0x49, 0xff}
-	cPurple  = color.RGBA{0xbc, 0x8c, 0xff, 0xff}
+	// Per-metric series colors come from metricdef (see hexColor).
 )
 
-// --- Metric definitions (mirrors app.js) ---
-
-type snapMetric struct {
-	key   string
-	label string
-	unit  string
-	color color.RGBA
-	prec  int
-	max   float64 // 0 = autoscale
-	// aggregate sums every metric sharing key, labels included, instead of
-	// taking the single unlabeled one — for metrics that exist only as a
-	// labeled split (gpu memory_used, one per workload class).
-	aggregate bool
-	transform func(float64) float64
+// hexColor parses a metricdef "#rrggbb" color into the renderer's RGBA.
+// Falls back to the text color on malformed input so a bad table entry
+// degrades visibly rather than panicking.
+func hexColor(h string) color.RGBA {
+	if len(h) != 7 || h[0] != '#' {
+		return cText
+	}
+	var r, g, b uint8
+	if _, err := fmt.Sscanf(h[1:], "%02x%02x%02x", &r, &g, &b); err != nil {
+		return cText
+	}
+	return color.RGBA{r, g, b, 0xff}
 }
 
-var snapDefs = map[string][]snapMetric{
-	"cpu": {
-		{key: "utilization", label: "UTIL", unit: "%", color: cAccent, prec: 1, max: 100},
-		{key: "frequency", label: "FREQ", unit: "MHz", color: cCyan, prec: 0},
-		{key: "power", label: "POWER", unit: "W", color: cOrange, prec: 2},
-		{key: "temperature", label: "TEMP", unit: "C", color: cRed, prec: 0},
-	},
-	"npu": {
-		{key: "utilization", label: "UTIL", unit: "%", color: cAccent, prec: 1, max: 100},
-		{key: "frequency", label: "FREQ", unit: "MHz", color: cCyan, prec: 0},
-		{key: "power", label: "POWER", unit: "W", color: cOrange, prec: 2},
-		{key: "temperature", label: "TEMP", unit: "C", color: cRed, prec: 0},
-		{key: "ddr_bandwidth", label: "DDR BW", unit: "GB/s", color: cPurple, prec: 2,
-			transform: func(v float64) float64 { return v / 1000.0 }},
-	},
-	"gpu": {
-		{key: "utilization", label: "UTIL", unit: "%", color: cAccent, prec: 1, max: 100},
-		{key: "frequency_actual", label: "FREQ", unit: "MHz", color: cCyan, prec: 0},
-		{key: "power", label: "POWER", unit: "W", color: cOrange, prec: 2},
-		{key: "temperature", label: "TEMP", unit: "C", color: cRed, prec: 0},
-		{key: "memory_used", label: "MEM", unit: "GB", color: cPurple, prec: 2, aggregate: true,
-			transform: func(v float64) float64 { return v / (1024 * 1024 * 1024) }},
-	},
-}
-
-var snapModuleOrder = []string{"cpu", "npu", "gpu"}
+// snapNow is the clock used for the header timestamp. Tests override it so
+// the rendered image is deterministic.
+var snapNow = time.Now
 
 // --- HTTP handler ---
 
@@ -107,7 +80,7 @@ const (
 func renderSnapshot(devices map[string]module.DeviceInfo, hist []collector.Sample) image.Image {
 	// Determine which modules to render (only those present in devices).
 	modules := make([]string, 0, 3)
-	for _, name := range snapModuleOrder {
+	for _, name := range metricdef.Order {
 		if _, ok := devices[name]; ok {
 			modules = append(modules, name)
 		}
@@ -123,7 +96,7 @@ func renderSnapshot(devices map[string]module.DeviceInfo, hist []collector.Sampl
 
 	// --- Header ---
 	c.bigText(snapPad, snapPad, "TopsWatch", cAccent, 2)
-	subtitle := time.Now().Format("2006-01-02 15:04:05")
+	subtitle := snapNow().Format("2006-01-02 15:04:05")
 	if len(hist) > 0 {
 		samples := len(hist)
 		subtitle += fmt.Sprintf("   |   %d samples", samples)
@@ -145,7 +118,7 @@ func renderSnapshot(devices map[string]module.DeviceInfo, hist []collector.Sampl
 }
 
 func drawModuleSection(c *snapCanvas, mod string, y int, hist []collector.Sample) {
-	defs := snapDefs[mod]
+	defs := metricdef.Cards[mod]
 	if len(defs) == 0 {
 		return
 	}
@@ -170,27 +143,27 @@ func drawModuleSection(c *snapCanvas, mod string, y int, hist []collector.Sample
 	drawChart(c, snapPad, chartY, snapW-2*snapPad, chartH, mod, hist)
 }
 
-func drawCard(c *snapCanvas, x, y, w, h int, def snapMetric, mod string, hist []collector.Sample) {
+func drawCard(c *snapCanvas, x, y, w, h int, def metricdef.Def, mod string, hist []collector.Sample) {
 	// Background
 	c.fill(x, y, w, h, cBgCard)
 	c.rectBorder(x, y, w, h, cBorder)
 
 	// Label
-	c.text(x+8, y+12, def.label, cTextDim)
+	c.text(x+8, y+12, def.Short, cTextDim)
 
 	// Value
 	last, ok := lastMetricValue(hist, mod, def)
-	if def.transform != nil && ok {
-		last = def.transform(last)
+	if def.Transform != nil && ok {
+		last = def.Transform(last)
 	}
 	val := "--"
 	if ok {
-		val = formatVal(last, def.prec)
+		val = formatVal(last, def.Precision)
 	}
-	c.bigText(x+8, y+18, val, def.color, 2)
+	c.bigText(x+8, y+18, val, hexColor(def.Color), 2)
 	// Unit
 	unitX := x + 8 + len(val)*7*2 + 4
-	c.text(unitX, y+34, def.unit, cTextDim)
+	c.text(unitX, y+34, def.Unit, cTextDim)
 
 	// Sparkline
 	sparkY := y + h - 16
@@ -200,7 +173,7 @@ func drawCard(c *snapCanvas, x, y, w, h int, def snapMetric, mod string, hist []
 	drawSparkline(c, sparkX, sparkY, sparkW, sparkH, mod, def, hist, 60)
 }
 
-func drawSparkline(c *snapCanvas, x, y, w, h int, mod string, def snapMetric, hist []collector.Sample, n int) {
+func drawSparkline(c *snapCanvas, x, y, w, h int, mod string, def metricdef.Def, hist []collector.Sample, n int) {
 	pts := metricSeries(hist, mod, def)
 	if len(pts) > n {
 		pts = pts[len(pts)-n:]
@@ -209,10 +182,10 @@ func drawSparkline(c *snapCanvas, x, y, w, h int, mod string, def snapMetric, hi
 		return
 	}
 	mn, mx := minMax(pts)
-	if def.max > 0 {
+	if def.Max > 0 {
 		mn = 0
-		if mx < def.max {
-			mx = def.max
+		if mx < def.Max {
+			mx = def.Max
 		}
 	}
 	if mx == mn {
@@ -223,7 +196,7 @@ func drawSparkline(c *snapCanvas, x, y, w, h int, mod string, def snapMetric, hi
 		px := x + i*w/(len(pts)-1)
 		py := y + h - int((v-mn)/(mx-mn)*float64(h))
 		if prevX >= 0 {
-			c.line(prevX, prevY, px, py, def.color)
+			c.line(prevX, prevY, px, py, hexColor(def.Color))
 		}
 		prevX, prevY = px, py
 	}
@@ -250,12 +223,11 @@ func drawChart(c *snapCanvas, x, y, w, h int, mod string, hist []collector.Sampl
 	}
 
 	// Each metric in module
-	defs := snapDefs[mod]
+	defs := metricdef.Cards[mod]
 	for _, def := range defs {
 		// Card-only metrics: their scales have nothing to do with the
 		// util/freq/power/temp lines.
-		if def.key == "ddr_bandwidth" || def.key == "memory_used" ||
-			strings.HasPrefix(def.key, "frequency_min") || strings.HasPrefix(def.key, "frequency_max") {
+		if !def.Chart {
 			continue
 		}
 		pts := metricSeries(hist, mod, def)
@@ -266,10 +238,10 @@ func drawChart(c *snapCanvas, x, y, w, h int, mod string, hist []collector.Sampl
 			continue
 		}
 		mn, mx := minMax(pts)
-		if def.max > 0 {
+		if def.Max > 0 {
 			mn = 0
-			if mx < def.max {
-				mx = def.max
+			if mx < def.Max {
+				mx = def.Max
 			}
 		}
 		if mx == mn {
@@ -280,7 +252,7 @@ func drawChart(c *snapCanvas, x, y, w, h int, mod string, hist []collector.Sampl
 			px := cx + i*cw/(len(pts)-1)
 			py := cy + ch - int((v-mn)/(mx-mn)*float64(ch))
 			if prevX >= 0 {
-				c.line(prevX, prevY, px, py, def.color)
+				c.line(prevX, prevY, px, py, hexColor(def.Color))
 			}
 			prevX, prevY = px, py
 		}
@@ -293,7 +265,7 @@ func drawInfoPanel(c *snapCanvas, x, y, w, h int, devices map[string]module.Devi
 
 	cols := 3
 	colW := (w - 16) / cols
-	for i, name := range snapModuleOrder {
+	for i, name := range metricdef.Order {
 		dev, ok := devices[name]
 		if !ok {
 			continue
@@ -336,31 +308,13 @@ func drawInfoRow(c *snapCanvas, x, y, w int, label, value string) {
 
 // --- Helpers ---
 
-// sampleMetricValue returns the value for (mod, key) within one sample.
-// Labeled metrics (per-core CPU, per-engine GPU, etc.) are skipped
-// because the snapshot only renders aggregates — unless the def asks for
-// them to be summed, which is how a labeled family yields a total.
-func sampleMetricValue(s collector.Sample, mod string, def snapMetric) (float64, bool) {
-	var sum float64
-	var found bool
-	for _, m := range s.Metrics[mod] {
-		if m.Name != def.key {
-			continue
-		}
-		if !def.aggregate {
-			if len(m.Labels) == 0 {
-				return m.Value, true
-			}
-			continue
-		}
-		sum += m.Value
-		found = true
-	}
-	return sum, found
+// sampleMetricValue returns the raw value for (mod, def) within one sample.
+func sampleMetricValue(s collector.Sample, mod string, def metricdef.Def) (float64, bool) {
+	return metricdef.Raw(s.Metrics[mod], def)
 }
 
 // lastMetricValue returns the most recent value matching (mod, def).
-func lastMetricValue(hist []collector.Sample, mod string, def snapMetric) (float64, bool) {
+func lastMetricValue(hist []collector.Sample, mod string, def metricdef.Def) (float64, bool) {
 	for i := len(hist) - 1; i >= 0; i-- {
 		if v, ok := sampleMetricValue(hist[i], mod, def); ok {
 			return v, true
@@ -371,15 +325,15 @@ func lastMetricValue(hist []collector.Sample, mod string, def snapMetric) (float
 
 // metricSeries returns the chronological sequence of values for
 // (mod, def) across the history.
-func metricSeries(hist []collector.Sample, mod string, def snapMetric) []float64 {
+func metricSeries(hist []collector.Sample, mod string, def metricdef.Def) []float64 {
 	out := make([]float64, 0, len(hist))
 	for _, s := range hist {
 		v, ok := sampleMetricValue(s, mod, def)
 		if !ok {
 			continue
 		}
-		if def.transform != nil {
-			v = def.transform(v)
+		if def.Transform != nil {
+			v = def.Transform(v)
 		}
 		out = append(out, v)
 	}
