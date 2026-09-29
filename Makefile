@@ -10,8 +10,14 @@ help: ## Show this help
 build: ## Build the daemon binary (also contains --tui)
 	go build -o $(BINARY) ./cmd/topswatch
 
-gui: ## Build the desktop viewer (needs cgo, libgl1-mesa-dev, xorg-dev)
-	go build -tags gui -o $(BINARY)-gui ./cmd/topswatch-gui
+# Build tags for the desktop viewer. The default compiles both the X11 and
+# Wayland backends (needs libwayland-dev and libxkbcommon-dev as well as the
+# X11 headers). Use GUI_TAGS="gui x11" for an X11-only build without the
+# Wayland packages.
+GUI_TAGS ?= gui
+
+gui: ## Build the desktop viewer (cgo; see README "Desktop viewer" for packages)
+	go build -tags "$(GUI_TAGS)" -o $(BINARY)-gui ./cmd/topswatch-gui
 
 test: ## Run tests
 	go test ./...

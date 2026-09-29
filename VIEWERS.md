@@ -52,6 +52,9 @@ still `CGO_ENABLED=0` and static; the Docker build is unchanged.
 GUI (only with `-tags gui`): `fyne.io/fyne/v2`. Fyne needs cgo and
 OpenGL/X11 headers, so `go build ./...`, `go vet ./...`, `go test ./...`
 and the Dockerfile do **not** compile it. The GUI is built with `make gui`.
+Fyne's GLFW compiles both the X11 and Wayland backends by default on
+Linux, so the build also needs `libwayland-dev` and `libxkbcommon-dev`;
+`make gui GUI_TAGS="gui x11"` builds an X11-only binary without them.
 
 ## Migration of metric definitions
 

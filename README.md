@@ -179,13 +179,22 @@ binary built with a build tag, because the Fyne toolkit needs cgo and
 OpenGL/X11 headers; the daemon binary stays static and dependency-free.
 
 ```bash
-# Build once, on a machine with a desktop toolchain
-sudo apt install gcc libgl1-mesa-dev xorg-dev
+# Build once, on a machine with a desktop toolchain (Ubuntu/Debian)
+sudo apt install gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
 make gui                                  # produces ./topswatch-gui
 
 # Run
 ./topswatch-gui                           # local daemon, 1s refresh
 ./topswatch-gui --connect device.local --refresh 2s
+```
+
+The default build supports both X11 and Wayland sessions, which is why
+it needs the Wayland headers even on an X11 desktop. If you would rather
+not install those, build the X11-only variant:
+
+```bash
+sudo apt install gcc libgl1-mesa-dev xorg-dev
+make gui GUI_TAGS="gui x11"
 ```
 
 Flags are `--connect` (as above) and `--refresh` (default `1s`). `q` or
