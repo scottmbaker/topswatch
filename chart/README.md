@@ -60,6 +60,7 @@ The DaemonSet runs with:
 | `config.collectors.cpu.enabled` | `true` | Enable CPU module |
 | `config.collectors.gpu.enabled` | `true` | Enable GPU module |
 | `config.collectors.npu.enabled` | `true` | Enable NPU module |
+| `config.collectors.power.enabled` | `true` | Enable energy counters (RAPL domains, battery) |
 | `resources` | `{}` | Resource limits/requests |
 | `nodeSelector` | `{}` | Node selector |
 | `tolerations` | `[]` | Tolerations |

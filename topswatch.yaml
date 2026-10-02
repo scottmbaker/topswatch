@@ -18,3 +18,6 @@ collectors:
     enabled: true
   npu:
     enabled: true
+  # RAPL energy domains and battery system power; adapts to what exists.
+  power:
+    enabled: true

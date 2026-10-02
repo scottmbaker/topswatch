@@ -30,10 +30,17 @@ type GPUCollectorConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+type PowerCollectorConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 type CollectorsConfig struct {
 	CPU CPUCollectorConfig `yaml:"cpu"`
 	GPU GPUCollectorConfig `yaml:"gpu"`
 	NPU NPUCollectorConfig `yaml:"npu"`
+	// Power collects RAPL energy domains and battery system power. It is
+	// on by default and adapts to whatever the platform exposes.
+	Power PowerCollectorConfig `yaml:"power"`
 }
 
 type Config struct {
@@ -56,6 +63,7 @@ func Defaults() Config {
 			CPU: CPUCollectorConfig{Enabled: true},
 			GPU: GPUCollectorConfig{Enabled: true},
 			NPU: NPUCollectorConfig{Enabled: true},
+			Power: PowerCollectorConfig{Enabled: true},
 		},
 	}
 }

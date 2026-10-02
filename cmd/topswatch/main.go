@@ -11,6 +11,7 @@ import (
 	"github.com/scottmbaker/topswatch/internal/collectors/cpu"
 	"github.com/scottmbaker/topswatch/internal/collectors/gpu"
 	"github.com/scottmbaker/topswatch/internal/collectors/npu"
+	"github.com/scottmbaker/topswatch/internal/collectors/power"
 	"github.com/scottmbaker/topswatch/internal/config"
 	"github.com/scottmbaker/topswatch/internal/module"
 	"github.com/scottmbaker/topswatch/internal/textout"
@@ -92,6 +93,17 @@ func main() {
 			modules = append(modules, npuMod)
 			info := npuMod.DeviceInfo()
 			log.Printf("[npu] %s (%s)", info.Name, info.PCIDevice)
+		}
+	}
+
+	if cfg.Collectors.Power.Enabled {
+		powerMod := power.New()
+		if err := powerMod.Init(); err != nil {
+			// Not an error condition: a VM or a locked-down kernel simply
+			// has nothing to offer here.
+			log.Printf("[power] %v (continuing without energy counters)", err)
+		} else {
+			modules = append(modules, powerMod)
 		}
 	}
 

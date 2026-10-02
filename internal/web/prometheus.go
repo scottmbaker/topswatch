@@ -58,13 +58,34 @@ func (p *promCollector) Collect(ch chan<- prometheus.Metric) {
 		for _, m := range metrics {
 			promName := metricToPromName(name, m)
 			desc := prometheus.NewDesc(promName, promHelp(name, m), nil, promLabels(m))
-			ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, m.Value)
+			ch <- prometheus.MustNewConstMetric(desc, promValueType(m), m.Value)
 		}
 	}
 }
 
+// promValueType reports cumulative metrics (accumulated energy and the
+// time it covers) as counters so rate() and increase() work on them;
+// everything else is a gauge.
+func promValueType(m module.Metric) prometheus.ValueType {
+	if isCumulative(m) {
+		return prometheus.CounterValue
+	}
+	return prometheus.GaugeValue
+}
+
+func isCumulative(m module.Metric) bool {
+	return m.Unit == "J" || m.Name == "measured_seconds"
+}
+
 func metricToPromName(moduleName string, m module.Metric) string {
 	base := "topswatch_" + moduleName + "_" + m.Name
+	if isCumulative(m) {
+		// Counter naming convention: <name>_<unit>_total.
+		if m.Unit == "J" {
+			return base + "_joules_total"
+		}
+		return base + "_total"
+	}
 	suffix := unitSuffix(m.Unit)
 	if suffix == "" || strings.HasSuffix(base, suffix) {
 		// No suffix, or the metric name already ends in the unit suffix
@@ -91,6 +112,8 @@ func unitSuffix(unit string) string {
 		return "_mbps"
 	case "bytes":
 		return "_bytes"
+	case "V":
+		return "_volts"
 	}
 	return ""
 }

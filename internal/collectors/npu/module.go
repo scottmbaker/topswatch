@@ -30,6 +30,7 @@ type Module struct {
 	prevEnergy     float64
 	prevEnergyTime time.Time
 	prevEnergySet  bool
+	energyTotalJ   float64 // joules accumulated since start
 	prevMemBW      uint64
 	prevMemBWTime  time.Time
 	prevMemBWSet   bool
@@ -244,6 +245,14 @@ func (m *Module) collectPMT() []module.Metric {
 					Name: "power", Value: watts, Unit: "W",
 				})
 			}
+			// Cumulative energy, so clients can bracket a workload by
+			// subtracting two readings. Labelled like the power module's
+			// domains so it stays out of the headline (unlabelled) set.
+			m.energyTotalJ += deltaJ
+			metrics = append(metrics, module.Metric{
+				Name: "energy", Value: m.energyTotalJ, Unit: "J",
+				Labels: map[string]string{"domain": "npu"},
+			})
 		}
 		m.prevEnergy = joules
 		m.prevEnergyTime = now
