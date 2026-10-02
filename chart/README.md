@@ -57,6 +57,7 @@ The DaemonSet runs with:
 | `config.server.port` | `9876` | Listening port |
 | `config.collector.interval` | `1s` | Poll interval |
 | `config.collector.history` | `300` | Ring buffer size |
+| `config.collector.processRescan` | `5s` | How often to walk all processes (new GPU/NPU clients, top-CPU list); `0` = every interval |
 | `config.collectors.cpu.enabled` | `true` | Enable CPU module |
 | `config.collectors.gpu.enabled` | `true` | Enable GPU module |
 | `config.collectors.npu.enabled` | `true` | Enable NPU module |

@@ -649,7 +649,28 @@
     // the moment the user opens the panel. Rendering is gated by showProcs.
     feedCPUSticky(procs.cpu || []);
     feedGPUSticky(procs.gpu || []);
+    renderProcNotes(procs.rescan_seconds || 0);
     renderProcPanels(procs);
+  }
+
+  // The daemon walks the whole process table only every rescan_seconds to
+  // keep its own overhead down. Say so next to each list, so a 5-second-old
+  // CPU table or a just-started process that has not appeared yet is not
+  // mistaken for a fault. Absent/0 means every sample: no note.
+  var lastRescanNote = -1;
+  function renderProcNotes(rescan) {
+    if (rescan === lastRescanNote) return;
+    lastRescanNote = rescan;
+    var every = rescan > 0 ? formatAge(Math.round(rescan)) : '';
+    var notes = {
+      'cpu-procs-note': every ? 'updates every ' + every + ', averaged' : '',
+      'gpu-procs-note': every ? 'usage live \u00b7 new processes appear within ' + every : '',
+      'npu-procs-note': every ? 'new processes appear within ' + every : ''
+    };
+    for (var id in notes) {
+      var el = document.getElementById(id);
+      if (el) el.textContent = notes[id];
+    }
   }
 
   function renderProcPanels(procs) {

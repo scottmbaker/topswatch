@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
+	_ "net/http/pprof" // registered on DefaultServeMux, served only with --pprof
 	"os"
 	"time"
 
@@ -25,6 +27,8 @@ func main() {
 	address := flag.String("address", "", "override server bind address")
 	port := flag.Int("port", 0, "override server port")
 	interval := flag.Duration("interval", 0, "override poll interval")
+	pprofAddr := flag.String("pprof", "", "serve Go profiling endpoints on this address (e.g. 127.0.0.1:6060); off by default")
+	processRescan := flag.Duration("process-rescan", -1, "how often to walk all processes for new GPU/NPU clients and the top-CPU list (default 5s, 0 = every sample); overrides collector.process_rescan")
 	tuiMode := flag.Bool("tui", false, "terminal dashboard attached to a running daemon, then exit")
 	connect := flag.String("connect", "", "daemon address for --tui (host, host:port, [v6]:port, or URL; default localhost:9876)")
 	refresh := flag.Duration("refresh", 0, "viewer refresh interval for --tui; 0 follows the daemon's own sample stream")
@@ -59,6 +63,10 @@ func main() {
 	}
 	if *interval != 0 {
 		cfg.Collector.Interval = *interval
+	}
+
+	if *processRescan >= 0 {
+		cfg.Collector.ProcessRescan = *processRescan
 	}
 
 	// Init modules
@@ -113,6 +121,13 @@ func main() {
 
 	coll := collector.New(modules, cfg.Collector.Interval, cfg.Collector.History)
 
+	coll.SetProcessRescan(cfg.Collector.ProcessRescan)
+	if cfg.Collector.ProcessRescan > 0 {
+		log.Printf("[collector] interval %s, process table walked every %s", cfg.Collector.Interval, cfg.Collector.ProcessRescan)
+	} else {
+		log.Printf("[collector] interval %s, process table walked every sample", cfg.Collector.Interval)
+	}
+
 	if *textMode {
 		// Collect twice with a gap for delta-based metrics (utilization, power)
 		coll.CollectOnce()
@@ -123,6 +138,14 @@ func main() {
 	}
 
 	// Serve mode
+	if *pprofAddr != "" {
+		// Profiling is opt-in and on its own listener; the main server's
+		// mux never exposes /debug/pprof.
+		go func() {
+			log.Printf("[pprof] listening on %s", *pprofAddr)
+			log.Printf("[pprof] %v", http.ListenAndServe(*pprofAddr, nil))
+		}()
+	}
 	coll.Start()
 	defer coll.Stop()
 

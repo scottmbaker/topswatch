@@ -9,6 +9,9 @@ server:
 collector:
   interval: 1s
   history: 300
+  # How often to walk every process (new GPU/NPU clients, top-CPU list).
+  # Known clients are still read every interval. 0 = walk every interval.
+  process_rescan: 5s
 
 # Collector modules
 collectors:

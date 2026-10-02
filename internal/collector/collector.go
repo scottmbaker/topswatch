@@ -60,6 +60,15 @@ func New(modules []module.Module, interval time.Duration, history int) *Collecto
 	}
 }
 
+// SetProcessRescan sets how often the per-process open-file scan for
+// GPU/NPU clients runs (see procwalk.Tracker.SetRescanInterval). Zero
+// scans on every sample.
+func (c *Collector) SetProcessRescan(d time.Duration) {
+	if c.procs != nil {
+		c.procs.SetRescanInterval(d)
+	}
+}
+
 // CollectOnce performs a single collection across all modules and returns the sample.
 func (c *Collector) CollectOnce() Sample {
 	s := Sample{
