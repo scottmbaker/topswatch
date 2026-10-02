@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scottmbaker/topswatch/internal/collectors/socpmt"
 	"github.com/scottmbaker/topswatch/internal/module"
 )
 
@@ -26,6 +27,12 @@ type Module struct {
 	prevEnergyUj   uint64
 	prevEnergyTime time.Time
 	prevEnergySet  bool
+	// PMT GT energy: fallback when the kernel exposes no RAPL uncore zone
+	// (seen on a Panther Lake board). Same counter as the uncore MSR.
+	gtPMT      *socpmt.Device
+	prevGTJ    float64
+	prevGTTime time.Time
+	prevGTSet  bool
 
 	// perf reader for engine-busy utilization (may be nil)
 	perf *perfReader
@@ -84,6 +91,12 @@ func (m *Module) Init() error {
 		m.rapl = r
 		log.Printf("[gpu] RAPL uncore at %s", r.energyPath)
 	}
+	if m.rapl == nil {
+		if d, err := socpmt.Open(); err == nil {
+			m.gtPMT = d
+			log.Printf("[gpu] GT energy from PMT (%s); power metric enabled", d.Generation())
+		}
+	}
 
 	// Discover perf engine-busy counters
 	if perf, err := discoverPerfReader(m.driver, card.pciSlot); err != nil {
@@ -138,6 +151,21 @@ func (m *Module) Collect() ([]module.Metric, error) {
 			m.prevEnergyUj = uj
 			m.prevEnergyTime = now
 			m.prevEnergySet = true
+		}
+	}
+
+	if m.rapl == nil && m.gtPMT != nil {
+		if j, err := m.gtPMT.GTEnergyJoules(); err == nil {
+			now := time.Now()
+			if m.prevGTSet {
+				dT := now.Sub(m.prevGTTime).Seconds()
+				if dJ := j - m.prevGTJ; dT > 0 && dJ >= 0 {
+					metrics = append(metrics, module.Metric{
+						Name: "power", Value: dJ / dT, Unit: "W",
+					})
+				}
+			}
+			m.prevGTJ, m.prevGTTime, m.prevGTSet = j, now, true
 		}
 	}
 

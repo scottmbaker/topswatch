@@ -90,23 +90,11 @@ func readProcStat(pid int) (jiffies uint64, rssPages uint64, ok bool) {
 // core for the whole interval reads 100%. So a 4-thread workload pegging
 // every thread reads 400%. This matches what `top` shows by default and
 // matches our `topswatch_cpu_cores_used` metric scaled to percent.
-func (t *Tracker) sampleCPUProcesses(now time.Time, maxResults int) []ProcessCPU {
-	pidEntries, err := os.ReadDir("/proc")
-	if err != nil {
-		return nil
-	}
-
+func (t *Tracker) sampleCPUProcesses(now time.Time, maxResults int, pids []int) []ProcessCPU {
 	var out []ProcessCPU
 	newState := make(map[int]*cpuPidState, len(t.cpuState))
 
-	for _, pe := range pidEntries {
-		if !pe.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(pe.Name())
-		if err != nil {
-			continue
-		}
+	for _, pid := range pids {
 		jiffies, rssPages, ok := readProcStat(pid)
 		if !ok {
 			continue

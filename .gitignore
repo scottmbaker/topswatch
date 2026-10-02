@@ -1,3 +1,4 @@
 topswatch
 topswatch.exe
 *.tar.gz
+__pycache__/

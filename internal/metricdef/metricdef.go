@@ -59,26 +59,59 @@ var Order = []string{"cpu", "npu", "gpu"}
 
 // Cards lists, per module, the headline metrics in display order.
 var Cards = map[string][]Def{
+	// One temperature, on the CPU row. The CPU package sensor is the SoC
+	// die's hottest reading in every state measured (idle, CPU, GPU and
+	// NPU load); the NPU's own sensor runs 10-30 C cooler and the GPU has
+	// none on current Xe parts. Separate cards only invited comparison of
+	// numbers that are not comparable.
 	"cpu": {
 		{Key: "utilization", Label: "Utilization", Short: "UTIL", Unit: "%", Color: ColorAccent, Precision: 1, Max: 100, Chart: true},
 		{Key: "frequency", Label: "Frequency", Short: "FREQ", Unit: "MHz", Color: ColorCyan, Precision: 0, Chart: true},
 		{Key: "power", Label: "Power", Short: "POWER", Unit: "W", Color: ColorOrange, Precision: 2, Chart: true},
-		{Key: "temperature", Label: "Temperature", Short: "TEMP", Unit: "C", Color: ColorRed, Precision: 0, Chart: true},
+		{Key: "temperature", Label: "SoC temperature", Short: "SOC TEMP", Unit: "C", Color: ColorRed, Precision: 0, Chart: true},
+		{Key: "memory_used", Label: "System memory", Short: "MEM", Unit: "GB", Color: ColorPurple, Precision: 1, Transform: bytesToGB},
 	},
 	"npu": {
 		{Key: "utilization", Label: "Utilization", Short: "UTIL", Unit: "%", Color: ColorAccent, Precision: 1, Max: 100, Chart: true},
 		{Key: "frequency", Label: "Frequency", Short: "FREQ", Unit: "MHz", Color: ColorCyan, Precision: 0, Chart: true},
 		{Key: "power", Label: "Power", Short: "POWER", Unit: "W", Color: ColorOrange, Precision: 2, Chart: true},
-		{Key: "temperature", Label: "Temperature", Short: "TEMP", Unit: "C", Color: ColorRed, Precision: 0, Chart: true},
 		{Key: "ddr_bandwidth", Label: "DDR Bandwidth", Short: "DDR BW", Unit: "GB/s", Color: ColorPurple, Precision: 2, Transform: mbToGB},
 	},
 	"gpu": {
 		{Key: "utilization", Label: "Utilization", Short: "UTIL", Unit: "%", Color: ColorAccent, Precision: 1, Max: 100, Chart: true},
 		{Key: "frequency_actual", Label: "Freq (actual)", Short: "FREQ", Unit: "MHz", Color: ColorCyan, Precision: 0, Chart: true},
 		{Key: "power", Label: "Power", Short: "POWER", Unit: "W", Color: ColorOrange, Precision: 2, Chart: true},
-		{Key: "temperature", Label: "Temperature", Short: "TEMP", Unit: "C", Color: ColorRed, Precision: 0, Chart: true},
 		{Key: "memory_used", Label: "Memory", Short: "MEM", Unit: "GB", Color: ColorPurple, Precision: 2, Aggregate: true, Transform: bytesToGB},
 	},
+}
+
+// Memory-bar inputs, in GB. The viewers draw one stacked bar for system
+// RAM: GPU buffers (which live in system RAM on an integrated GPU and are
+// already inside "used"), the rest of "used", and free.
+var (
+	SystemMemoryUsed  = Def{Key: "memory_used", Transform: bytesToGB}
+	SystemMemoryTotal = Def{Key: "memory_total", Transform: bytesToGB}
+	GPUMemoryUsed     = Def{Key: "memory_used", Aggregate: true, Transform: bytesToGB}
+)
+
+// MemoryBar is the stacked memory split, in GB, for one sample.
+type MemoryBar struct {
+	Total, Used, GPU float64
+}
+
+// Memory derives the bar from a sample's cpu and gpu metric lists. ok is
+// false when the daemon reports no system memory.
+func Memory(cpu, gpu []module.Metric) (MemoryBar, bool) {
+	total, ok1 := Value(cpu, SystemMemoryTotal)
+	used, ok2 := Value(cpu, SystemMemoryUsed)
+	if !ok1 || !ok2 || total <= 0 {
+		return MemoryBar{}, false
+	}
+	g, _ := Value(gpu, GPUMemoryUsed)
+	if g > used {
+		g = used
+	}
+	return MemoryBar{Total: total, Used: used, GPU: g}, true
 }
 
 // Raw returns the untransformed value for d within one module's metric

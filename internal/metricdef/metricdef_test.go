@@ -25,9 +25,9 @@ func TestRawSkipsLabeledUnlessAggregate(t *testing.T) {
 
 func TestValueAppliesTransform(t *testing.T) {
 	ms := []module.Metric{{Name: "memory_used", Value: 2 * gib, Labels: map[string]string{"class": "compute"}}}
-	d := Cards["gpu"][4]
+	d := Cards["gpu"][3]
 	if d.Key != "memory_used" {
-		t.Fatalf("gpu card 4 is %s, expected memory_used", d.Key)
+		t.Fatalf("gpu card 3 is %s, expected memory_used", d.Key)
 	}
 	if v, ok := Value(ms, d); !ok || v != 2 {
 		t.Fatalf("got %v %v, want 2 true", v, ok)
@@ -51,5 +51,47 @@ func TestTableShape(t *testing.T) {
 				t.Errorf("%s/%s: color %q is not #rrggbb", mod, d.Key, d.Color)
 			}
 		}
+	}
+}
+
+func TestOneTemperatureOnTheCPURow(t *testing.T) {
+	for _, mod := range []string{"npu", "gpu"} {
+		for _, d := range Cards[mod] {
+			if d.Key == "temperature" {
+				t.Errorf("%s still has a temperature card", mod)
+			}
+		}
+	}
+	found := false
+	for _, d := range Cards["cpu"] {
+		if d.Key == "temperature" && d.Chart {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("cpu row lost its temperature")
+	}
+}
+
+func TestMemoryBar(t *testing.T) {
+	cpu := []module.Metric{
+		{Name: "memory_total", Value: 64 * gib, Unit: "bytes"},
+		{Name: "memory_used", Value: 10 * gib, Unit: "bytes"},
+	}
+	gpu := []module.Metric{
+		{Name: "memory_used", Value: 1 * gib, Labels: map[string]string{"class": "compute"}},
+		{Name: "memory_used", Value: 0.5 * gib, Labels: map[string]string{"class": "graphics"}},
+	}
+	b, ok := Memory(cpu, gpu)
+	if !ok || b.Total != 64 || b.Used != 10 || b.GPU != 1.5 {
+		t.Fatalf("bar = %+v ok=%v", b, ok)
+	}
+	if _, ok := Memory(nil, gpu); ok {
+		t.Fatal("no system memory must report !ok")
+	}
+	// GPU can never exceed used.
+	gpu[0].Value = 20 * gib
+	if b, _ := Memory(cpu, gpu); b.GPU != b.Used {
+		t.Fatalf("gpu clamp: %+v", b)
 	}
 }

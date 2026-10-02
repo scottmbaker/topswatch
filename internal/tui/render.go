@@ -45,12 +45,14 @@ const (
 	sparkSamples = 60
 )
 
-func computeLayout(w, h, nModules int) layout {
+// computeLayout budgets the frame. extra is the height of optional panels
+// (the energy panel); charts shrink or drop to make room for it.
+func computeLayout(w, h, nModules, extra int) layout {
 	l := layout{width: w, height: h, sparkN: sparkSamples, gap: true}
 	if nModules == 0 {
 		return l
 	}
-	fixed := headerLines + footerLines + nModules*(moduleTitleL+cardLines+moduleGapL)
+	fixed := headerLines + footerLines + extra + nModules*(moduleTitleL+cardLines+moduleGapL)
 	if fixed > h {
 		// Too short even for cards plus gaps: drop the gaps first.
 		l.gap = false
@@ -96,16 +98,20 @@ func (c *chartCache) get(mod string, w, h int, gen uint64, build func() string) 
 // frame is everything the view needs; it is built by the model and
 // rendered by pure functions so tests can drive it without a terminal.
 type frame struct {
-	charts   *chartCache
-	addr     string
-	now      time.Time
-	tier     string
-	mode     string // "stream" or "poll 2s"
-	paused   bool
-	err      string
-	devices  map[string]module.DeviceInfo
-	warnings []collector.Warning
-	store    *store
+	charts    *chartCache
+	addr      string
+	now       time.Time
+	tier      string
+	mode      string // "stream" or "poll 2s"
+	paused    bool
+	err       string
+	devices   map[string]module.DeviceInfo
+	warnings  []collector.Warning
+	store     *store
+	energy    *energyView // nil when the energy panel is off
+	recordFor time.Duration
+	mem       metricdef.MemoryBar
+	hasMem    bool
 }
 
 func render(f frame, l layout) string {
@@ -116,6 +122,7 @@ func render(f frame, l layout) string {
 	for _, mod := range mods {
 		b.WriteString(renderModule(f, mod, l))
 	}
+	b.WriteString(renderEnergy(f.energy, l.width))
 	b.WriteString(renderFooter(f, l.width))
 	return b.String()
 }
@@ -150,6 +157,10 @@ func renderModule(f frame, mod string, l layout) string {
 
 	defs := metricdef.Cards[mod]
 	b.WriteString(renderCards(f.store, mod, defs, l.width, l.sparkN))
+	if mod == "cpu" && f.hasMem {
+		b.WriteString(renderMemoryBar(f.mem, l.width))
+		b.WriteByte('\n')
+	}
 	if l.chartH > 0 {
 		b.WriteString(f.charts.get(mod, l.width, l.chartH, f.store.gen, func() string {
 			return renderChart(f.store, mod, defs, l.width, l.chartH)
@@ -322,8 +333,55 @@ func renderFooter(f frame, w int) string {
 		b.WriteString(styDim.Render("no warnings"))
 	}
 	b.WriteByte('\n')
-	b.WriteString(styDim.Render("q quit   r cycle range   p pause"))
+	keys := "q quit   r cycle range   p pause"
+	if f.energy != nil {
+		keys += "   s energy start/stop   t record " + shortDuration(f.recordFor) + "   b idle baseline   c clear"
+	}
+	b.WriteString(styDim.Render(truncate(keys, w)))
 	return b.String()
+}
+
+// shortDuration prints 5m, 90s, 2h for key hints.
+func shortDuration(d time.Duration) string {
+	switch {
+	case d >= time.Hour && d%time.Hour == 0:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d >= time.Minute && d%time.Minute == 0:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+}
+
+// renderMemoryBar draws system RAM as one stacked bar: GPU buffers (part
+// of "used" on an integrated GPU), the rest of used, and free.
+func renderMemoryBar(mb metricdef.MemoryBar, w int) string {
+	label := styDim.Render("MEM ")
+	text := fmt.Sprintf(" %.1f GB used", mb.Used)
+	if mb.GPU > 0 {
+		text += fmt.Sprintf(" (GPU %.1f)", mb.GPU)
+	}
+	text += fmt.Sprintf("  %.1f free of %.0f GB", mb.Total-mb.Used, mb.Total)
+	barW := w - lipgloss.Width(label) - lipgloss.Width(text)
+	if barW < 10 {
+		// Too narrow for a bar: numbers only.
+		return truncate(label+strings.TrimSpace(text), w)
+	}
+	cells := func(gb float64) int { return int(gb/mb.Total*float64(barW) + 0.5) }
+	g := cells(mb.GPU)
+	u := cells(mb.Used) - g
+	if u < 0 {
+		u = 0
+	}
+	if g+u > barW {
+		u = barW - g
+	}
+	// Three distinct fills: GPU solid purple, other used solid blue, free a
+	// light hatch in the text colour so the empty part is clearly a bar.
+	bar := colorStyle(metricdef.ColorPurple).Render(strings.Repeat("█", g)) +
+		styAccent.Render(strings.Repeat("█", u)) +
+		styDim.Render(strings.Repeat("▒", barW-g-u))
+	return label + bar + text
 }
 
 // --- helpers ---

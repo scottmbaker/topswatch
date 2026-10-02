@@ -10,10 +10,10 @@ var pmtGUIDs = map[CPUGen][]string{
 
 // registerDef describes a field within the PMT telemetry buffer.
 type registerDef struct {
-	offset  int // byte offset into the telemetry buffer
-	bitLo   int // low bit (inclusive)
-	bitHi   int // high bit (inclusive)
-	size    int // read size in bytes (4 or 8)
+	offset int // byte offset into the telemetry buffer
+	bitLo  int // low bit (inclusive)
+	bitHi  int // high bit (inclusive)
+	size   int // read size in bytes (4 or 8)
 }
 
 // genRegisters holds the register layout for a CPU generation.
@@ -22,32 +22,44 @@ type genRegisters struct {
 	temperature registerDef
 	workpoint   registerDef
 	memoryBW    registerDef
+	// memoryBWUnit is the number of bytes one count of memoryBW stands
+	// for: 1000 where Intel's XML types it tbw_KB (MTL, ARL), 1024 for
+	// tbw_1024B (LNL, PTL).
+	memoryBWUnit float64
 }
 
 var registerTable = map[CPUGen]genRegisters{
+	// Layouts per Intel-PMT xml/<gen>/0/*_aggregator.xml. The SOC
+	// temperature word packs one 8-bit sensor per byte; VPU_TEMP sits at
+	// bits [40:47] on MTL and LNL but moved to [32:39] on PTL, where
+	// [40:47] is the Media engine.
 	GenMeteorLake: {
-		energy:      registerDef{offset: 0x628, bitLo: 0, bitHi: 63, size: 8},
-		temperature: registerDef{offset: 0x98, bitLo: 40, bitHi: 47, size: 8},
-		workpoint:   registerDef{offset: 0x68, bitLo: 0, bitHi: 23, size: 4},
-		memoryBW:    registerDef{offset: 0x0, bitLo: 0, bitHi: 31, size: 4},
+		energy:       registerDef{offset: 0x628, bitLo: 0, bitHi: 63, size: 8},
+		temperature:  registerDef{offset: 0x98, bitLo: 40, bitHi: 47, size: 8},
+		workpoint:    registerDef{offset: 0x68, bitLo: 0, bitHi: 23, size: 4},
+		memoryBW:     registerDef{offset: 0x0, bitLo: 0, bitHi: 31, size: 4},
+		memoryBWUnit: 1000,
 	},
 	GenArrowLake: {
-		energy:      registerDef{offset: 0x628, bitLo: 0, bitHi: 63, size: 8},
-		temperature: registerDef{offset: 0x98, bitLo: 40, bitHi: 47, size: 8},
-		workpoint:   registerDef{offset: 0x68, bitLo: 0, bitHi: 23, size: 4},
-		memoryBW:    registerDef{offset: 0x0, bitLo: 0, bitHi: 31, size: 4},
+		energy:       registerDef{offset: 0x628, bitLo: 0, bitHi: 63, size: 8},
+		temperature:  registerDef{offset: 0x98, bitLo: 40, bitHi: 47, size: 8},
+		workpoint:    registerDef{offset: 0x68, bitLo: 0, bitHi: 23, size: 4},
+		memoryBW:     registerDef{offset: 0x0, bitLo: 0, bitHi: 31, size: 4},
+		memoryBWUnit: 1000,
 	},
 	GenLunarLake: {
-		energy:      registerDef{offset: 0x5d0, bitLo: 0, bitHi: 63, size: 8},
-		temperature: registerDef{offset: 0x70, bitLo: 40, bitHi: 47, size: 8},
-		workpoint:   registerDef{offset: 0x18, bitLo: 0, bitHi: 23, size: 4},
-		memoryBW:    registerDef{offset: 0xc18, bitLo: 0, bitHi: 31, size: 4},
+		energy:       registerDef{offset: 0x5d0, bitLo: 0, bitHi: 63, size: 8},
+		temperature:  registerDef{offset: 0x70, bitLo: 40, bitHi: 47, size: 8},
+		workpoint:    registerDef{offset: 0x18, bitLo: 0, bitHi: 23, size: 4},
+		memoryBW:     registerDef{offset: 0xc18, bitLo: 0, bitHi: 31, size: 4},
+		memoryBWUnit: 1024,
 	},
 	GenPantherLake: {
-		energy:      registerDef{offset: 0x670, bitLo: 0, bitHi: 63, size: 8},
-		temperature: registerDef{offset: 0x78, bitLo: 40, bitHi: 47, size: 8},
-		workpoint:   registerDef{offset: 0x18, bitLo: 0, bitHi: 23, size: 4},
-		memoryBW:    registerDef{offset: 0xc18, bitLo: 0, bitHi: 31, size: 4},
+		energy:       registerDef{offset: 0x670, bitLo: 0, bitHi: 63, size: 8},
+		temperature:  registerDef{offset: 0x78, bitLo: 32, bitHi: 39, size: 8},
+		workpoint:    registerDef{offset: 0x18, bitLo: 0, bitHi: 23, size: 4},
+		memoryBW:     registerDef{offset: 0xc18, bitLo: 0, bitHi: 31, size: 4},
+		memoryBWUnit: 1024,
 	},
 }
 

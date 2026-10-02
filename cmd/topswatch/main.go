@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
+	_ "net/http/pprof" // registered on DefaultServeMux, served only with --pprof
 	"os"
 	"time"
 
@@ -11,7 +13,9 @@ import (
 	"github.com/scottmbaker/topswatch/internal/collectors/cpu"
 	"github.com/scottmbaker/topswatch/internal/collectors/gpu"
 	"github.com/scottmbaker/topswatch/internal/collectors/npu"
+	"github.com/scottmbaker/topswatch/internal/collectors/power"
 	"github.com/scottmbaker/topswatch/internal/config"
+	"github.com/scottmbaker/topswatch/internal/measure"
 	"github.com/scottmbaker/topswatch/internal/module"
 	"github.com/scottmbaker/topswatch/internal/textout"
 	"github.com/scottmbaker/topswatch/internal/tui"
@@ -24,18 +28,35 @@ func main() {
 	address := flag.String("address", "", "override server bind address")
 	port := flag.Int("port", 0, "override server port")
 	interval := flag.Duration("interval", 0, "override poll interval")
+	pprofAddr := flag.String("pprof", "", "serve Go profiling endpoints on this address (e.g. 127.0.0.1:6060); off by default")
+	processRescan := flag.Duration("process-rescan", -1, "how often to walk all processes for new GPU/NPU clients and the top-CPU list (default 5s, 0 = every sample); overrides collector.process_rescan")
 	tuiMode := flag.Bool("tui", false, "terminal dashboard attached to a running daemon, then exit")
 	connect := flag.String("connect", "", "daemon address for --tui (host, host:port, [v6]:port, or URL; default localhost:9876)")
 	refresh := flag.Duration("refresh", 0, "viewer refresh interval for --tui; 0 follows the daemon's own sample stream")
+	energyPanel := flag.Bool("energy", false, "with --tui: show the watt-hour panel (s start/stop, b idle baseline, c clear)")
+	baseline := flag.Duration("baseline", 0, "idle-baseline length: with --measure, measured before the command (0 = none); with --tui --energy, the length of a capture (default 10s)")
+	measureMode := flag.Bool("measure", false, "run a command and report the energy it used: topswatch --measure [--baseline 10s] [--json] -- command [args...]")
+	jsonOut := flag.Bool("json", false, "with --measure: print the report as JSON")
+	recordFor := flag.Duration("record", 0, "with --tui --energy: length of the timed recording started with t (default 5m)")
+	measureFor := flag.Duration("for", 0, "with --measure and no command: measure for this long, e.g. --for 5m")
 	flag.Parse()
 
 	// Viewer mode needs no hardware access or config: it is a client of a
 	// daemon that is already running (locally by default).
 	if *tuiMode {
-		if err := tui.Run(tui.Options{Addr: *connect, Refresh: *refresh}); err != nil {
+		if err := tui.Run(tui.Options{Addr: *connect, Refresh: *refresh, Energy: *energyPanel, Baseline: *baseline, Record: *recordFor}); err != nil {
 			log.Fatalf("[tui] %v", err)
 		}
 		return
+	}
+	if *measureMode {
+		code, err := measure.Run(measure.Options{
+			Addr: *connect, Baseline: *baseline, JSON: *jsonOut, Command: flag.Args(), For: *measureFor,
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "topswatch:", err)
+		}
+		os.Exit(code)
 	}
 
 	// Load config
@@ -58,6 +79,9 @@ func main() {
 	}
 	if *interval != 0 {
 		cfg.Collector.Interval = *interval
+	}
+	if *processRescan >= 0 {
+		cfg.Collector.ProcessRescan = *processRescan
 	}
 
 	// Init modules
@@ -95,11 +119,28 @@ func main() {
 		}
 	}
 
+	if cfg.Collectors.Power.Enabled {
+		powerMod := power.New()
+		if err := powerMod.Init(); err != nil {
+			// Not an error condition: a VM or a locked-down kernel simply
+			// has nothing to offer here.
+			log.Printf("[power] %v (continuing without energy counters)", err)
+		} else {
+			modules = append(modules, powerMod)
+		}
+	}
+
 	if len(modules) == 0 {
 		log.Fatal("no modules initialized — nothing to monitor")
 	}
 
 	coll := collector.New(modules, cfg.Collector.Interval, cfg.Collector.History)
+	coll.SetProcessRescan(cfg.Collector.ProcessRescan)
+	if cfg.Collector.ProcessRescan > 0 {
+		log.Printf("[collector] interval %s, process table walked every %s", cfg.Collector.Interval, cfg.Collector.ProcessRescan)
+	} else {
+		log.Printf("[collector] interval %s, process table walked every sample", cfg.Collector.Interval)
+	}
 
 	if *textMode {
 		// Collect twice with a gap for delta-based metrics (utilization, power)
@@ -111,6 +152,14 @@ func main() {
 	}
 
 	// Serve mode
+	if *pprofAddr != "" {
+		// Profiling is opt-in and on its own listener; the main server's
+		// mux never exposes /debug/pprof.
+		go func() {
+			log.Printf("[pprof] listening on %s", *pprofAddr)
+			log.Printf("[pprof] %v", http.ListenAndServe(*pprofAddr, nil))
+		}()
+	}
 	coll.Start()
 	defer coll.Stop()
 

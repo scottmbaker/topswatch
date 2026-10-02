@@ -11,6 +11,9 @@ CPU
   Frequency:       2460 MHz
   Power:           15.42 W
   Temperature:     57.47 C
+  Memory Used:     13.93 GiB
+  Memory Total:    32.00 GiB
+  Memory %:        37 %
 
 GPU
   Device:          Intel Arc Graphics (8086:b0a0)
