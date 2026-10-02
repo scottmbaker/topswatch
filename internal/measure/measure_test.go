@@ -112,3 +112,15 @@ func TestRunErrors(t *testing.T) {
 		t.Fatalf("missing binary: code %d err %v", code, err)
 	}
 }
+
+func TestRunForFixedTime(t *testing.T) {
+	srv := fakeDaemon(t, true)
+	var out bytes.Buffer
+	code, err := Run(Options{Addr: srv.URL, For: 150 * time.Millisecond, Report: &out})
+	if err != nil || code != 0 {
+		t.Fatalf("code %d err %v", code, err)
+	}
+	if !strings.Contains(out.String(), "window") || !strings.Contains(out.String(), "SoC total") {
+		t.Fatalf("report:\n%s", out.String())
+	}
+}

@@ -98,19 +98,20 @@ func (c *chartCache) get(mod string, w, h int, gen uint64, build func() string) 
 // frame is everything the view needs; it is built by the model and
 // rendered by pure functions so tests can drive it without a terminal.
 type frame struct {
-	charts   *chartCache
-	addr     string
-	now      time.Time
-	tier     string
-	mode     string // "stream" or "poll 2s"
-	paused   bool
-	err      string
-	devices  map[string]module.DeviceInfo
-	warnings []collector.Warning
-	store    *store
-	energy   *energyView // nil when the energy panel is off
-	mem      metricdef.MemoryBar
-	hasMem   bool
+	charts    *chartCache
+	addr      string
+	now       time.Time
+	tier      string
+	mode      string // "stream" or "poll 2s"
+	paused    bool
+	err       string
+	devices   map[string]module.DeviceInfo
+	warnings  []collector.Warning
+	store     *store
+	energy    *energyView // nil when the energy panel is off
+	recordFor time.Duration
+	mem       metricdef.MemoryBar
+	hasMem    bool
 }
 
 func render(f frame, l layout) string {
@@ -334,10 +335,22 @@ func renderFooter(f frame, w int) string {
 	b.WriteByte('\n')
 	keys := "q quit   r cycle range   p pause"
 	if f.energy != nil {
-		keys += "   s energy start/stop   b idle baseline   c clear"
+		keys += "   s energy start/stop   t record " + shortDuration(f.recordFor) + "   b idle baseline   c clear"
 	}
 	b.WriteString(styDim.Render(truncate(keys, w)))
 	return b.String()
+}
+
+// shortDuration prints 5m, 90s, 2h for key hints.
+func shortDuration(d time.Duration) string {
+	switch {
+	case d >= time.Hour && d%time.Hour == 0:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d >= time.Minute && d%time.Minute == 0:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
 }
 
 // renderMemoryBar draws system RAM as one stacked bar: GPU buffers (part

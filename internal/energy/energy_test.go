@@ -288,3 +288,47 @@ func TestBatteryInterruptedFallsBackToPsysWithReason(t *testing.T) {
 		t.Fatalf("footnotes = %v", r.Footnotes())
 	}
 }
+
+func TestSessionTimedRecording(t *testing.T) {
+	s := NewSession(10 * time.Second)
+	mk := func(sec, pkg float64) Reading {
+		return reading(sec, map[string]float64{"package": pkg}, 0, false)
+	}
+	s.Observe(mk(0, 0))
+	s.StartFor(30 * time.Second)
+	if p, r := s.Planned(); p != 30*time.Second || r != 30*time.Second {
+		t.Fatalf("planned %v remaining %v", p, r)
+	}
+	s.Observe(mk(20, 200))
+	if _, r := s.Planned(); r != 10*time.Second || s.State() != Running {
+		t.Fatalf("remaining %v state %v", r, s.State())
+	}
+	s.Observe(mk(30, 300))
+	if s.State() != Stopped {
+		t.Fatal("timed measurement did not stop itself")
+	}
+	rep, _ := s.Report()
+	if rep.Seconds != 30 || !near(line(t, rep, KeySoC).Joules, 300) {
+		t.Fatalf("final report: %+v", rep)
+	}
+	s.Observe(mk(40, 999)) // frozen
+	if rep2, _ := s.Report(); rep2.Seconds != 30 {
+		t.Fatal("report changed after auto-stop")
+	}
+	// Toggle after a timed run starts a fresh open-ended one.
+	s.Toggle()
+	if p, _ := s.Planned(); p != 0 || s.State() != Running {
+		t.Fatalf("toggle after timed run: planned %v state %v", p, s.State())
+	}
+	// Toggle stops a timed run early.
+	s.Reset()
+	s.StartFor(time.Hour)
+	s.Observe(mk(50, 1000))
+	s.Toggle()
+	if s.State() != Stopped {
+		t.Fatal("toggle did not stop the timed run early")
+	}
+	if rep3, _ := s.Report(); rep3.Seconds != 10 {
+		t.Fatalf("early stop seconds = %v", rep3.Seconds)
+	}
+}

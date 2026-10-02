@@ -30,6 +30,9 @@ type Options struct {
 	Baseline time.Duration // idle window measured before the command; 0 = none
 	JSON     bool          // machine-readable report
 	Command  []string      // command and arguments
+	// For measures for a fixed time instead of running a command (the
+	// workload is started elsewhere, e.g. a demo already on screen).
+	For time.Duration
 	// Report is where the result goes (stderr by default, like time(1), so
 	// the command's own stdout stays clean).
 	Report io.Writer
@@ -52,8 +55,8 @@ const firstSampleTimeout = 15 * time.Second
 // Run executes the command and writes the report. It returns the
 // command's exit code.
 func Run(opts Options) (int, error) {
-	if len(opts.Command) == 0 {
-		return 2, errors.New("no command given; usage: topswatch --measure [--baseline 10s] [--json] -- command [args...]")
+	if len(opts.Command) == 0 && opts.For <= 0 {
+		return 2, errors.New("nothing to measure; usage: topswatch --measure [--baseline 10s] [--json] -- command [args...]   or   topswatch --measure --for 5m")
 	}
 	if opts.Report == nil {
 		opts.Report = os.Stderr
@@ -134,25 +137,36 @@ func Run(opts Options) (int, error) {
 		return 2, err
 	}
 
-	cmd := exec.Command(opts.Command[0], opts.Command[1:]...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	// Ctrl-C goes to the child (same process group); we stay alive to
-	// report what was used up to that point.
-	signal.Ignore(syscall.SIGINT)
-	defer signal.Reset(syscall.SIGINT)
-
-	t0 := time.Now()
-	runErr := cmd.Run()
-	cmdDur := time.Since(t0)
-
 	exit := 0
-	if runErr != nil {
-		var ee *exec.ExitError
-		if errors.As(runErr, &ee) {
-			exit = ee.ExitCode()
-		} else {
-			return 127, fmt.Errorf("cannot run %q: %w", opts.Command[0], runErr)
+	var cmdDur time.Duration
+	what := strings.Join(opts.Command, " ")
+	if len(opts.Command) > 0 {
+		cmd := exec.Command(opts.Command[0], opts.Command[1:]...)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		// Ctrl-C goes to the child (same process group); we stay alive to
+		// report what was used up to that point.
+		signal.Ignore(syscall.SIGINT)
+		defer signal.Reset(syscall.SIGINT)
+
+		t0 := time.Now()
+		runErr := cmd.Run()
+		cmdDur = time.Since(t0)
+		if runErr != nil {
+			var ee *exec.ExitError
+			if errors.As(runErr, &ee) {
+				exit = ee.ExitCode()
+			} else {
+				return 127, fmt.Errorf("cannot run %q: %w", opts.Command[0], runErr)
+			}
 		}
+	} else {
+		what = fmt.Sprintf("%s window", energy.FormatDuration(opts.For))
+		if !opts.JSON {
+			fmt.Fprintf(opts.Report, "topswatch: measuring for %s...\n", opts.For)
+		}
+		t0 := time.Now()
+		time.Sleep(opts.For)
+		cmdDur = time.Since(t0)
 	}
 
 	end, err := next()
@@ -180,8 +194,12 @@ func Run(opts Options) (int, error) {
 		})
 	}
 
-	fmt.Fprintf(opts.Report, "\ntopswatch: %s  (command ran %s, exit %d, window %s)\n\n",
-		strings.Join(opts.Command, " "), energy.FormatDuration(cmdDur), exit, energy.FormatDuration(rep.Elapsed))
+	if len(opts.Command) > 0 {
+		fmt.Fprintf(opts.Report, "\ntopswatch: %s  (command ran %s, exit %d, window %s)\n\n",
+			what, energy.FormatDuration(cmdDur), exit, energy.FormatDuration(rep.Elapsed))
+	} else {
+		fmt.Fprintf(opts.Report, "\ntopswatch: %s  (window %s)\n\n", what, energy.FormatDuration(rep.Elapsed))
+	}
 	fmt.Fprint(opts.Report, rep.Table())
 	fmt.Fprintln(opts.Report)
 	for _, n := range notes {

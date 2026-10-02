@@ -37,19 +37,21 @@ func main() {
 	baseline := flag.Duration("baseline", 0, "idle-baseline length: with --measure, measured before the command (0 = none); with --tui --energy, the length of a capture (default 10s)")
 	measureMode := flag.Bool("measure", false, "run a command and report the energy it used: topswatch --measure [--baseline 10s] [--json] -- command [args...]")
 	jsonOut := flag.Bool("json", false, "with --measure: print the report as JSON")
+	recordFor := flag.Duration("record", 0, "with --tui --energy: length of the timed recording started with t (default 5m)")
+	measureFor := flag.Duration("for", 0, "with --measure and no command: measure for this long, e.g. --for 5m")
 	flag.Parse()
 
 	// Viewer mode needs no hardware access or config: it is a client of a
 	// daemon that is already running (locally by default).
 	if *tuiMode {
-		if err := tui.Run(tui.Options{Addr: *connect, Refresh: *refresh, Energy: *energyPanel, Baseline: *baseline}); err != nil {
+		if err := tui.Run(tui.Options{Addr: *connect, Refresh: *refresh, Energy: *energyPanel, Baseline: *baseline, Record: *recordFor}); err != nil {
 			log.Fatalf("[tui] %v", err)
 		}
 		return
 	}
 	if *measureMode {
 		code, err := measure.Run(measure.Options{
-			Addr: *connect, Baseline: *baseline, JSON: *jsonOut, Command: flag.Args(),
+			Addr: *connect, Baseline: *baseline, JSON: *jsonOut, Command: flag.Args(), For: *measureFor,
 		})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "topswatch:", err)

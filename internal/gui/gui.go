@@ -38,6 +38,9 @@ type Options struct {
 	Energy bool
 	// Baseline is how long an idle-baseline capture lasts (default 10s).
 	Baseline time.Duration
+	// Record is the length of the timed measurement started by the
+	// "Record" button (default 5m).
+	Record time.Duration
 }
 
 // Run opens the window and blocks until it is closed.
@@ -48,6 +51,9 @@ func Run(opts Options) error {
 	}
 	if opts.Refresh <= 0 {
 		opts.Refresh = time.Second
+	}
+	if opts.Record <= 0 {
+		opts.Record = 5 * time.Minute
 	}
 
 	a := app.New()
@@ -63,7 +69,7 @@ func Run(opts Options) error {
 
 	var panel *energyPanel
 	if opts.Energy {
-		panel = newEnergyPanel(opts.Baseline)
+		panel = newEnergyPanel(opts.Baseline, opts.Record)
 		// Beside the dashboard on a wide window (a landscape handheld),
 		// beneath it on a tall one.
 		split := container.New(adaptiveSplit{}, img, panel.box)
@@ -98,6 +104,11 @@ func Run(opts Options) error {
 		case 'c':
 			if panel != nil {
 				panel.session.Reset()
+				panel.render()
+			}
+		case 't':
+			if panel != nil {
+				panel.session.StartFor(panel.record)
 				panel.render()
 			}
 		}
@@ -160,10 +171,23 @@ type energyPanel struct {
 	start   *widget.Button
 	table   *widget.Label
 	state   *widget.Label
+	record  time.Duration
 }
 
-func newEnergyPanel(baseline time.Duration) *energyPanel {
-	p := &energyPanel{session: energy.NewSession(baseline)}
+// shortDuration prints 5 min, 90 s, 2 h for button labels.
+func shortDuration(d time.Duration) string {
+	switch {
+	case d >= time.Hour && d%time.Hour == 0:
+		return fmt.Sprintf("%d h", int(d.Hours()))
+	case d >= time.Minute && d%time.Minute == 0:
+		return fmt.Sprintf("%d min", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%d s", int(d.Seconds()))
+	}
+}
+
+func newEnergyPanel(baseline, record time.Duration) *energyPanel {
+	p := &energyPanel{session: energy.NewSession(baseline), record: record}
 	p.table = widget.NewLabel("")
 	p.table.TextStyle = fyne.TextStyle{Monospace: true}
 	p.state = widget.NewLabel("Energy: waiting for counters from the daemon…")
@@ -173,6 +197,7 @@ func newEnergyPanel(baseline time.Duration) *energyPanel {
 	// fyne.Do from the poll loop), so the session needs no locking.
 	// Each button carries its keyboard shortcut; the keys match the TUI.
 	p.start = widget.NewButton("Start (s)", func() { p.session.Toggle(); p.render() })
+	timed := widget.NewButton("Record "+shortDuration(record)+" (t)", func() { p.session.StartFor(p.record); p.render() })
 	base := widget.NewButton("Idle baseline (b)", func() { p.session.StartBaseline(); p.render() })
 	clear := widget.NewButton("Clear (c)", func() { p.session.Reset(); p.render() })
 
@@ -185,7 +210,7 @@ func newEnergyPanel(baseline time.Duration) *energyPanel {
 	reserve.SetMinSize(fyne.NewSize(tableSize.Width+2*theme.Padding(), tableSize.Height*10))
 
 	p.box = container.NewVBox(
-		container.NewHBox(p.start, base, clear),
+		container.NewHBox(p.start, timed, base, clear),
 		p.state,
 		container.NewStack(reserve, p.table),
 	)
@@ -265,6 +290,9 @@ func (p *energyPanel) render() {
 	case energy.Running:
 		p.start.SetText("Stop (s)")
 		status = "Measuring " + energy.FormatDuration(rep.Elapsed)
+		if planned, remaining := s.Planned(); planned > 0 {
+			status += fmt.Sprintf(" of %s, %s left", shortDuration(planned), energy.FormatDuration(remaining))
+		}
 	case energy.Stopped:
 		p.start.SetText("Start (s)")
 		status = "Stopped at " + energy.FormatDuration(rep.Elapsed)

@@ -103,3 +103,24 @@ func TestEnergyPanelStopwatch(t *testing.T) {
 	}
 	m.cancel()
 }
+
+func TestEnergyPanelTimedRecording(t *testing.T) {
+	c, _ := client.New("localhost:1")
+	m := newModel(c, Options{Energy: true, Record: 20 * time.Second})
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 60})
+	m.Update(sampleMsg(energySample(0, 0)))
+	if !strings.Contains(m.View(), "t record 20s") {
+		t.Fatalf("footer should show the record key and length:\n%s", m.View())
+	}
+	m.Update(key('t'))
+	m.Update(sampleMsg(energySample(5, 50)))
+	out := m.View()
+	if !strings.Contains(out, "measuring") || !strings.Contains(out, "of 20s, 15.0s left") {
+		t.Fatalf("timed status missing:\n%s", out)
+	}
+	m.Update(sampleMsg(energySample(20, 200)))
+	if !strings.Contains(m.View(), "stopped 20.0s") {
+		t.Fatalf("did not stop itself:\n%s", m.View())
+	}
+	m.cancel()
+}

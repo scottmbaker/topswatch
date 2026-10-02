@@ -16,6 +16,7 @@ If you just want the answer, three ready-made front ends exist (see
 | You want to | Use |
 |---|---|
 | wrap one command | `topswatch --measure --baseline 30s -- ./demo.sh` |
+| measure a demo that is already running | `topswatch --measure --for 5m`, or the "Record 5 min" button (`t`) in the viewers |
 | start and stop by hand while watching | `topswatch --tui --energy` (`b` baseline, `s` start/stop) |
 | start and stop from separate scripts or agents | [`examples/energy_odometer.py`](examples/energy_odometer.py) |
 
@@ -60,8 +61,9 @@ System total: the demo itself used 232.3 mWh on top of 45.1 mWh the platform
 would have used anyway (7.74 W steady state), 277.5 mWh in all.
 ```
 
-`read` reports without stopping, `--json` gives the same data for
-machines, and `reset` forgets the trip and the baseline.
+`read` reports without stopping, `record --seconds 300` does start, wait
+and stop in one go, `--json` gives the same data for machines, and
+`reset` forgets the trip and the baseline.
 
 That device has no battery, so its system total is the platform's RAPL
 `psys` estimate. On a battery-powered handheld (Seco F36, same SoC) the

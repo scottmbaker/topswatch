@@ -29,6 +29,9 @@ type Options struct {
 	Energy bool
 	// Baseline is how long an idle-baseline capture lasts (default 10s).
 	Baseline time.Duration
+	// Record is the length of a timed measurement started with t
+	// (default 5m).
+	Record time.Duration
 }
 
 // Run starts the TUI and blocks until the user quits.
@@ -90,6 +93,9 @@ func newModel(c *client.Client, opts Options) *model {
 	var session *energy.Session
 	if opts.Energy {
 		session = energy.NewSession(opts.Baseline)
+	}
+	if opts.Record <= 0 {
+		opts.Record = 5 * time.Minute
 	}
 	return &model{
 		session: session,
@@ -254,6 +260,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.session.StartBaseline()
 			case "c":
 				m.session.Reset()
+			case "t":
+				m.session.StartFor(m.opts.Record)
 			}
 		}
 		return m, nil
@@ -357,19 +365,20 @@ func (m *model) View() string {
 		mode = "poll " + m.opts.Refresh.String()
 	}
 	f := frame{
-		charts:   m.charts,
-		addr:     m.c.Base(),
-		now:      time.Now(),
-		tier:     m.tier(),
-		mode:     mode,
-		paused:   m.paused,
-		err:      m.lastErr,
-		devices:  m.devices,
-		warnings: m.warnings,
-		store:    m.store,
-		energy:   newEnergyView(m.session),
-		mem:      m.mem,
-		hasMem:   m.hasMem,
+		charts:    m.charts,
+		addr:      m.c.Base(),
+		now:       time.Now(),
+		tier:      m.tier(),
+		mode:      mode,
+		paused:    m.paused,
+		err:       m.lastErr,
+		devices:   m.devices,
+		warnings:  m.warnings,
+		store:     m.store,
+		energy:    newEnergyView(m.session),
+		recordFor: m.opts.Record,
+		mem:       m.mem,
+		hasMem:    m.hasMem,
 	}
 	extra := f.energy.height()
 	if m.hasMem {

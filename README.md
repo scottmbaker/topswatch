@@ -283,8 +283,8 @@ by component.
 
 *A 30-second, 16-thread CPU load on a Dell XPS 14 on battery, after a
 16-second idle baseline. The system total is measured by the battery
-gauge: 362.6 mWh in all, of which the demo itself cost 317.8 mWh on top
-of the 45 mWh the laptop would have used anyway at its 5.4 W steady
+gauge: 371.0 mWh in all, of which the demo itself cost 318.8 mWh on top
+of the 52 mWh the laptop would have used anyway at its 6.3 W steady
 state.*
 
 ### How the counters work
@@ -350,9 +350,11 @@ display stays uncluttered:
 ./topswatch --tui --energy
 ```
 
-`s` starts and stops a measurement, `c` clears it, and `b` captures an
-idle baseline (10s by default, `--baseline 30s` to change). The panel is
-one line until you start; while measuring it shows a live table.
+`s` starts and stops a measurement, `t` records for a fixed time (5
+minutes by default, `--record 10m` to change) and stops by itself, `c`
+clears, and `b` captures an idle baseline (10s by default, `--baseline
+30s` to change). The panel is one line until you start; while measuring
+it shows a live table.
 
 **2. Wrap a command**, like `time`:
 
@@ -360,6 +362,7 @@ one line until you start; while measuring it shows a live table.
 ./topswatch --measure -- ./run-benchmark.sh
 ./topswatch --measure --baseline 10s -- python3 infer.py   # also report energy above idle
 ./topswatch --measure --json -- ./run-benchmark.sh 2> energy.json
+./topswatch --measure --for 5m                             # no command: a demo already running
 ```
 
 The command's own output is untouched; the report goes to stderr and the
@@ -372,8 +375,9 @@ daemon.
 ./topswatch-gui --energy
 ```
 
-adds Start/Stop, Idle baseline and Clear beside the dashboard (or under
-it on a tall window); each button shows its key: `s`, `b`, `c`.
+adds Start/Stop, Record 5 min, Idle baseline and Clear beside the
+dashboard (or under it on a tall window); each button shows its key:
+`s`, `t`, `b`, `c`. `--record 10m` changes the recording length.
 
 **What the report looks like** (a 20-second, 8-thread CPU load on a Core
 Ultra 5 335, with a 10s idle baseline):

@@ -228,8 +228,12 @@ reading, take another, subtract. The daemon holds no session state, so
 any number of viewers and scripts can measure independently, and an old
 viewer against a new daemon (or the reverse) degrades to "no energy
 counters" rather than failing. Three triggers share that logic: the TUI
-stopwatch (`--tui --energy`), `--measure -- command`, and the GUI panel
-(`topswatch-gui --energy`).
+stopwatch (`--tui --energy`, keys s/t/b/c), `--measure -- command` or
+`--measure --for 5m`, and the GUI panel (`topswatch-gui --energy`). A
+timed recording (the "Record 5 min" button, `t`, `--record` to change
+the length) stops itself after that much sample time, for a demo that is
+already running and cannot be wrapped; verified on the Dell with a 20 s
+recording (stopped at 21.0 s, the next sample past the target).
 
 **Breakdown.** RAPL domains nest (package contains core, uncore and the
 NPU; DRAM is outside it), so the report shows components plus remainders

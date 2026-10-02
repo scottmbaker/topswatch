@@ -23,6 +23,8 @@ type energyView struct {
 	baseRemaining time.Duration
 	base          *energy.Report
 	baselineFor   time.Duration
+
+	planned, remaining time.Duration // timed recording, when planned > 0
 }
 
 func newEnergyView(s *energy.Session) *energyView {
@@ -32,6 +34,7 @@ func newEnergyView(s *energy.Session) *energyView {
 	v := &energyView{supported: s.Supported(), state: s.State(), baselineFor: s.BaselineFor}
 	v.report, v.hasReport = s.Report()
 	v.baseCapturing, v.baseRemaining, v.base = s.Baseline()
+	v.planned, v.remaining = s.Planned()
 	return v
 }
 
@@ -56,11 +59,14 @@ func (v *energyView) lines() []string {
 	switch v.state {
 	case energy.Running:
 		status = styRun.Render("● measuring ") + styBold.Render(energy.FormatDuration(v.report.Elapsed))
+		if v.planned > 0 {
+			status += styDim.Render(fmt.Sprintf(" of %s, %s left", shortDuration(v.planned), energy.FormatDuration(v.remaining)))
+		}
 	case energy.Stopped:
 		status = styStop.Render("■ stopped ") + styBold.Render(energy.FormatDuration(v.report.Elapsed)) +
 			styDim.Render("   s starts a new measurement")
 	default:
-		status = styDim.Render("press s to start measuring")
+		status = styDim.Render("press s to start measuring, t to record for a fixed time")
 	}
 
 	var base string

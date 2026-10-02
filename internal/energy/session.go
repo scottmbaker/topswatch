@@ -24,6 +24,10 @@ type Session struct {
 	state State
 	start Reading
 	final Report
+	// recordFor, when non-zero, is the planned length of the running
+	// measurement; Observe stops it once that much sample time has
+	// elapsed.
+	recordFor time.Duration
 
 	baseCapturing bool
 	baseStart     Reading
@@ -45,6 +49,11 @@ func (s *Session) Observe(r Reading) {
 		return
 	}
 	s.latest, s.hasLatest = r, true
+	if s.state == Running && s.recordFor > 0 && r.Time.Sub(s.start.Time) >= s.recordFor {
+		s.final = s.report(r)
+		s.state = Stopped
+		s.recordFor = 0
+	}
 	if s.baseCapturing && r.Time.Sub(s.baseStart.Time) >= s.BaselineFor {
 		rep := Diff(s.baseStart, r)
 		s.base = &rep
@@ -65,14 +74,40 @@ func (s *Session) Toggle() {
 	case Running:
 		s.final = s.report(s.latest)
 		s.state = Stopped
+		s.recordFor = 0
 	default:
 		s.start = s.latest
 		s.state = Running
+		s.recordFor = 0
 	}
 }
 
+// StartFor begins a measurement that stops itself after d of sample
+// time (a "record for 5 minutes" button). Toggle stops it early.
+func (s *Session) StartFor(d time.Duration) {
+	if !s.hasLatest || d <= 0 {
+		return
+	}
+	s.start = s.latest
+	s.state = Running
+	s.recordFor = d
+}
+
+// Planned returns the planned length of a timed measurement and how
+// much of it remains; planned is 0 for an open-ended measurement.
+func (s *Session) Planned() (planned, remaining time.Duration) {
+	if s.state != Running || s.recordFor == 0 {
+		return 0, 0
+	}
+	rem := s.recordFor - s.latest.Time.Sub(s.start.Time)
+	if rem < 0 {
+		rem = 0
+	}
+	return s.recordFor, rem
+}
+
 // Reset clears the measurement (the baseline is kept).
-func (s *Session) Reset() { s.state = Idle }
+func (s *Session) Reset() { s.state, s.recordFor = Idle, 0 }
 
 // StartBaseline begins an idle-baseline capture. The device should be
 // idle for BaselineFor.

@@ -9,6 +9,7 @@ platform would have used anyway sitting at its steady state?
     ...run the demo...
     energy_odometer.py read                    #    (optional) peek while it runs
     energy_odometer.py stop                    # 3. report
+    energy_odometer.py record --seconds 300    # or: start, wait, stop in one go
 
 State lives in a small JSON file, so start and stop can be separate
 commands, separate scripts, or separate agents. Standard library only.
@@ -194,6 +195,9 @@ def main():
     for name, text in (("read", "report without stopping"), ("stop", "report and stop")):
         p = sub.add_parser(name, help=text)
         p.add_argument("--json", action="store_true")
+    r = sub.add_parser("record", help="start, wait a fixed time, then report (default 5 minutes)")
+    r.add_argument("--seconds", type=float, default=300)
+    r.add_argument("--json", action="store_true")
     sub.add_parser("reset", help="forget the trip and the baseline")
     args = ap.parse_args()
 
@@ -217,6 +221,14 @@ def main():
         state["start"] = read(args.url)
         save(args.state, state)
         print("trip started")
+    elif args.cmd == "record":
+        state["start"] = read(args.url)
+        save(args.state, state)
+        print(f"recording for {args.seconds:.0f}s...", file=sys.stderr)
+        time.sleep(args.seconds)
+        report(state, read(args.url), args.json)
+        del state["start"]
+        save(args.state, state)
     else:  # read / stop
         if "start" not in state:
             sys.exit("no trip in progress; run 'start' first")
