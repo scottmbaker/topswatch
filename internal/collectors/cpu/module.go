@@ -184,6 +184,18 @@ func (m *Module) Collect() ([]module.Metric, error) {
 		}
 	}
 
+	// System memory. "Used" is total minus the kernel's MemAvailable
+	// estimate, which is what free(1) reports; on an integrated GPU the
+	// GPU's buffers live in this same pool and are part of "used".
+	if total, avail, ok := readMemInfo(); ok {
+		used := total - avail
+		metrics = append(metrics,
+			module.Metric{Name: "memory_used", Value: float64(used), Unit: "bytes"},
+			module.Metric{Name: "memory_total", Value: float64(total), Unit: "bytes"},
+			module.Metric{Name: "memory_used_percent", Value: float64(used) / float64(total) * 100, Unit: "%"},
+		)
+	}
+
 	// Temperature (hwmon coretemp/k10temp, millidegrees -> degrees)
 	if m.hwmonTempPath != "" {
 		if mC, err := readUint(m.hwmonTempPath); err == nil {
@@ -346,6 +358,33 @@ func readAvgFreqMHz() (float64, bool) {
 		return 0, false
 	}
 	return float64(sumKhz) / float64(n) / 1000.0, true
+}
+
+// --- memory ---
+
+// readMemInfo returns MemTotal and MemAvailable in bytes.
+func readMemInfo() (total, avail uint64, ok bool) {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		v, err := strconv.ParseUint(f[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		switch f[0] {
+		case "MemTotal:":
+			total = v * 1024
+		case "MemAvailable:":
+			avail = v * 1024
+		}
+	}
+	return total, avail, total > 0 && avail <= total
 }
 
 // --- RAPL (power) ---

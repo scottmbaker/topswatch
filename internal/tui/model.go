@@ -12,6 +12,8 @@ import (
 
 	"github.com/scottmbaker/topswatch/internal/client"
 	"github.com/scottmbaker/topswatch/internal/collector"
+	"github.com/scottmbaker/topswatch/internal/energy"
+	"github.com/scottmbaker/topswatch/internal/metricdef"
 	"github.com/scottmbaker/topswatch/internal/module"
 )
 
@@ -22,6 +24,11 @@ type Options struct {
 	// Refresh is the polling interval. Zero means follow the daemon's SSE
 	// stream, i.e. redraw once per daemon sample.
 	Refresh time.Duration
+	// Energy enables the watt-hour panel and its keys (s start/stop, b
+	// idle baseline, c clear). Off by default to keep the display quiet.
+	Energy bool
+	// Baseline is how long an idle-baseline capture lasts (default 10s).
+	Baseline time.Duration
 }
 
 // Run starts the TUI and blocks until the user quits.
@@ -70,6 +77,9 @@ type model struct {
 	paused        bool
 	lastSample    time.Time
 	charts        *chartCache
+	session       *energy.Session // nil unless Options.Energy
+	mem           metricdef.MemoryBar
+	hasMem        bool
 
 	// stream mode
 	samples chan collector.Sample
@@ -77,14 +87,19 @@ type model struct {
 
 func newModel(c *client.Client, opts Options) *model {
 	ctx, cancel := context.WithCancel(context.Background())
+	var session *energy.Session
+	if opts.Energy {
+		session = energy.NewSession(opts.Baseline)
+	}
 	return &model{
-		c:      c,
-		opts:   opts,
-		ctx:    ctx,
-		cancel: cancel,
-		store:  newStore(),
-		ranges: []string{collector.TierShort},
-		charts: newChartCache(),
+		session: session,
+		c:       c,
+		opts:    opts,
+		ctx:     ctx,
+		cancel:  cancel,
+		store:   newStore(),
+		ranges:  []string{collector.TierShort},
+		charts:  newChartCache(),
 	}
 }
 
@@ -231,6 +246,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.paused = !m.paused
 			return m, nil
 		}
+		if m.session != nil {
+			switch msg.String() {
+			case "s":
+				m.session.Toggle()
+			case "b":
+				m.session.StartBaseline()
+			case "c":
+				m.session.Reset()
+			}
+		}
 		return m, nil
 
 	case devicesMsg:
@@ -276,10 +301,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastErr = ""
 		m.warnings = s.Warnings
 		m.lastSample = s.Timestamp
+		if m.session != nil {
+			// Energy keeps counting while the charts are paused or showing
+			// a longer history range.
+			m.session.Observe(energy.FromSample(s))
+		}
 		if m.devices == nil && len(s.Devices) > 0 {
 			// The initial /api/devices fetch failed (daemon was down or
 			// unreachable); every sample carries the same info.
 			m.devices = s.Devices
+		}
+		if !m.paused {
+			m.mem, m.hasMem = metricdef.Memory(s.Metrics["cpu"], s.Metrics["gpu"])
 		}
 		if !m.paused && m.tier() == collector.TierShort {
 			m.store.push(s.Timestamp, s.Metrics)
@@ -334,6 +367,13 @@ func (m *model) View() string {
 		devices:  m.devices,
 		warnings: m.warnings,
 		store:    m.store,
+		energy:   newEnergyView(m.session),
+		mem:      m.mem,
+		hasMem:   m.hasMem,
 	}
-	return render(f, computeLayout(m.width, m.height, len(presentModules(m.devices))))
+	extra := f.energy.height()
+	if m.hasMem {
+		extra++ // the memory bar line under the CPU cards
+	}
+	return render(f, computeLayout(m.width, m.height, len(presentModules(m.devices)), extra))
 }

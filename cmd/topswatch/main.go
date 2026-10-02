@@ -15,6 +15,7 @@ import (
 	"github.com/scottmbaker/topswatch/internal/collectors/npu"
 	"github.com/scottmbaker/topswatch/internal/collectors/power"
 	"github.com/scottmbaker/topswatch/internal/config"
+	"github.com/scottmbaker/topswatch/internal/measure"
 	"github.com/scottmbaker/topswatch/internal/module"
 	"github.com/scottmbaker/topswatch/internal/textout"
 	"github.com/scottmbaker/topswatch/internal/tui"
@@ -32,15 +33,28 @@ func main() {
 	tuiMode := flag.Bool("tui", false, "terminal dashboard attached to a running daemon, then exit")
 	connect := flag.String("connect", "", "daemon address for --tui (host, host:port, [v6]:port, or URL; default localhost:9876)")
 	refresh := flag.Duration("refresh", 0, "viewer refresh interval for --tui; 0 follows the daemon's own sample stream")
+	energyPanel := flag.Bool("energy", false, "with --tui: show the watt-hour panel (s start/stop, b idle baseline, c clear)")
+	baseline := flag.Duration("baseline", 0, "idle-baseline length: with --measure, measured before the command (0 = none); with --tui --energy, the length of a capture (default 10s)")
+	measureMode := flag.Bool("measure", false, "run a command and report the energy it used: topswatch --measure [--baseline 10s] [--json] -- command [args...]")
+	jsonOut := flag.Bool("json", false, "with --measure: print the report as JSON")
 	flag.Parse()
 
 	// Viewer mode needs no hardware access or config: it is a client of a
 	// daemon that is already running (locally by default).
 	if *tuiMode {
-		if err := tui.Run(tui.Options{Addr: *connect, Refresh: *refresh}); err != nil {
+		if err := tui.Run(tui.Options{Addr: *connect, Refresh: *refresh, Energy: *energyPanel, Baseline: *baseline}); err != nil {
 			log.Fatalf("[tui] %v", err)
 		}
 		return
+	}
+	if *measureMode {
+		code, err := measure.Run(measure.Options{
+			Addr: *connect, Baseline: *baseline, JSON: *jsonOut, Command: flag.Args(),
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "topswatch:", err)
+		}
+		os.Exit(code)
 	}
 
 	// Load config
@@ -64,7 +78,6 @@ func main() {
 	if *interval != 0 {
 		cfg.Collector.Interval = *interval
 	}
-
 	if *processRescan >= 0 {
 		cfg.Collector.ProcessRescan = *processRescan
 	}
@@ -120,7 +133,6 @@ func main() {
 	}
 
 	coll := collector.New(modules, cfg.Collector.Interval, cfg.Collector.History)
-
 	coll.SetProcessRescan(cfg.Collector.ProcessRescan)
 	if cfg.Collector.ProcessRescan > 0 {
 		log.Printf("[collector] interval %s, process table walked every %s", cfg.Collector.Interval, cfg.Collector.ProcessRescan)
