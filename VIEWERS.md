@@ -196,6 +196,246 @@ gnome-shell at ~10% for the gnome-terminal case; that was a one-off from
 the terminal window being created during the sample window, not a
 steady-state cost. The ordering is not in doubt.
 
+## Energy counters and watt-hour measurement
+
+Added on `feature/energy-counters`.
+
+**Daemon.** A new `power` collector (`internal/collectors/power`) reads
+every RAPL zone the platform exposes and, where a battery fuel gauge
+exists, whole-system power. It emits cumulative joules since daemon
+start, labelled by `domain`. The NPU collector additionally emits its
+own cumulative energy. All new metrics are labelled or live in the new
+`power` module, so the existing headline metrics, `--text` goldens, the
+web UI and the snapshot are unchanged; `--text` gains a `Power` section
+on real hardware. The CPU and GPU collectors are untouched (they still
+derive `power` from package and uncore as before).
+
+Adaptivity is structural, not error handling: each source is optional
+and absent sources produce no metrics. Observed so far:
+
+| Device | RAPL domains | System source |
+|---|---|---|
+| NUC (Core Ultra 5 335) | package, core, uncore, dram, psys | psys |
+| Seco F36 (same SoC, battery) | package, core, dram, uncore via PMT (no RAPL uncore, no psys) | battery, while discharging |
+
+A single-tick energy jump implying more than 2 kW is dropped. This
+covers counter resets across suspend and counters that wrap earlier than
+`max_energy_range_uj` advertises (a known issue with `psys` on current
+firmware), at the cost of one tick of data per event.
+
+**Clients.** Session logic is client-side (`internal/energy`): take a
+reading, take another, subtract. The daemon holds no session state, so
+any number of viewers and scripts can measure independently, and an old
+viewer against a new daemon (or the reverse) degrades to "no energy
+counters" rather than failing. Three triggers share that logic: the TUI
+stopwatch (`--tui --energy`), `--measure -- command`, and the GUI panel
+(`topswatch-gui --energy`).
+
+**Breakdown.** RAPL domains nest (package contains core, uncore and the
+NPU; DRAM is outside it), so the report shows components plus remainders
+("SoC other", "Rest of system") and the rows sum to the totals. Where a
+board has no `uncore` domain the remainder is labelled "SoC other+GPU".
+On the NUC, package tracked core + uncore with a steady ~2 W remainder
+from idle (2.4 W) to full CPU load (49 W), DRAM moved independently under
+memory load, and psys stayed above package throughout, which supports
+the nesting. That the NPU is inside the package figure is assumed from
+it being on the same die; it has not been verified under an NPU load.
+
+**Battery validity.** Battery current equals system draw only while the
+battery is actually powering the device. The daemon accumulates battery
+energy only in that state and also exports how many seconds it covered;
+a client accepts the battery figure for a window only if the coverage
+matches the elapsed time, so a run that was on external power for any
+part of it reports no system total.
+
+The gauge's "Discharging" status is not sufficient evidence of that
+state. On the F36, with a full battery and power arriving through a path
+the firmware does not report as the adapter, the gauge said
+"Discharging" with the adapter flagged offline while supplying about
+0.3 W against a SoC drawing 7-15 W, and its charge counter did not move.
+The first build trusted the label and reported a 0.5 W "system total".
+The daemon now compares battery power with SoC package power: a battery
+reading below half the package power is shown immediately as "on
+external power", and after three such samples in a row the battery stops
+accumulating (the run length tolerates a gauge lagging a load step).
+Clients independently reject a battery total smaller than 0.8x the SoC
+total for the same window. Verified on the F36 in that state: the daemon
+logs the condition, `--text`, `--measure`, the odometer script and
+Prometheus all report no system total, and percentages are computed
+against the SoC total.
+
+Verified on the F36 on genuine battery power as well:
+
+| Check | Result |
+|---|---|
+| Daemon battery power vs. gauge V x I, 5 samples | identical (20.2-20.4 W) |
+| Coverage over 20 s windows, idle and under load | 20.0 s of 20.0 s |
+| Idle | system 20.6 W, of which SoC 2.4 W and DRAM 0.15 W |
+| 8-thread load | system 37.8 W, of which SoC 15.0 W |
+| 31 s measured run | 321.6 mWh system, 147.7 mWh above idle |
+| Cross-check against the gauge's own charge counter over baseline + run | 452 mWh by charge counter vs. about 450 mWh integrated (within the counter's 1 mAh step) |
+
+On this handheld the SoC is a small part of the story: at idle 88% of
+the draw is "Rest of system" (display, storage, radios, conversion), and
+it rises by about 4.5 W under CPU load (fan and regulator losses), which
+RAPL alone would never show. That run also illustrated why the baseline
+must be taken like-for-like: a baseline taken straight after a load read
+21.9 W instead of 20.2 W while the device was still warm.
+
+**GUI energy panel.** Run on the F36's 1280x800 display. The panel sits
+beside the dashboard on a wide window and beneath it on a tall one (an
+adaptive split, since a stacked layout does not fit a landscape
+handheld). Start/Stop, Idle baseline and Clear were exercised there:
+baseline capture, a live table while measuring, and a frozen result on
+stop, with the system total coming from the battery gauge. The buttons
+carry their keys (s, b, c), the same as the TUI, and the README
+screenshot was taken by driving those keys on the Dell XPS 14 on
+battery.
+
+## Dashboard changes after the first energy runs (2026-10-02)
+
+Prompted by looking at the TUI and GUI on the F36, with both devices as
+test beds. Each was checked against Intel's published telemetry
+definitions (github.com/intel/Intel-PMT, `xml/PTL/0`) and against
+measurements.
+
+**GPU power was missing on the F36.** Its kernel registers no RAPL
+`uncore` zone and no perf `energy-gpu` event on this boot, although the
+MSR behind them counts normally (the NUC has all three). Intel's SoC
+telemetry region (GUID 0x3086000, the one the NPU collector already
+reads) carries `VCCGT_ENERGY`, documented as the same counter as the
+uncore MSR, and measured identical to it under load (6.24 W). The GPU
+collector and the power collector now fall back to that counter
+(`internal/collectors/socpmt`, with offsets for MTL, LNL and PTL keyed by
+GUID) when the RAPL zone is absent; RAPL is still preferred where it
+exists. Result on the F36: GPU 0.58 W idle, 6.3 W under GPU load, and the
+energy breakdown gains its GPU row there.
+
+Why the zone goes missing, established across four Panther Lake
+machines (NUC 335 and F36 on the same 6.18-intel build, a Dell XPS 14 on
+6.18.23, an ASUS NUC 358H on 7.0.0): the kernel's `intel_rapl_msr`
+driver checks each domain's counter once at module load and drops any
+that reads zero, which the GPU's does while it is still power-gated
+early in boot. It is a race between module load and GPU initialisation,
+not a kernel-version feature: the F36 had the zone on one boot and not
+the next, and on the Dell `modprobe -r intel_rapl_msr && modprobe
+intel_rapl_msr` after the GPU had been used made the zone (and the perf
+`energy-gpu` event) appear at once. Two of the four machines lacked it
+at the time of testing.
+
+**NPU temperature read the wrong sensor on Panther Lake.** The SoC
+temperature word packs one sensor per byte; the code used bits [40:47]
+for every generation, which is `VPU_TEMP` on Meteor Lake and Lunar Lake
+but `Media_TEMP` on Panther Lake, where the VPU sensor moved to [32:39].
+Fixed for PTL only. The corrected reading rises with NPU load (36 to
+44 C) and the old one barely did.
+
+**NPU DDR bandwidth** was validated under a synthetic NPU workload:
+the daemon's 47 GB/s against 47.6 GB/s computed from the workload's own
+inference rate and weight size. Intel types the PTL/LNL counter as
+1024-byte units; the code divided by 1000 (right for MTL's `tbw_KB`), a
+2.4% error now corrected per generation.
+
+**NPU power is an estimate, and a low one.** `VPU_ENERGY` is documented
+as "estimated by Pcode using utilization factor". On the F36 at 90%
+NPU utilization it reports 0.38 W while package power rises by about
+6 W with the cores idle; the format (U18.14) is the same one that makes
+the package and core counters in that region match RAPL to three
+decimals, so this is the firmware's estimate, not a conversion error.
+Left as is and documented; the "SoC other" row of the energy breakdown
+absorbs the difference.
+
+**One temperature.** The CPU package sensor is the hottest reading in
+every state measured on both devices (idle, CPU, GPU and NPU load; e.g.
+97 C vs the NPU's 67 C under CPU load, 59 vs 42 under GPU load), and no
+Xe part here exposes a GPU sensor. The TUI, GUI and snapshot now show a
+single "SoC temp" on the CPU row and no temperature on the NPU and GPU
+rows. The daemon still exports all of them; the web UI is unchanged.
+
+**System memory.** The CPU collector now reports `memory_used`,
+`memory_total` and `memory_used_percent` from `/proc/meminfo`. The
+viewers show a memory card on the CPU row and a stacked bar under it:
+GPU buffers (which on an integrated GPU live in system RAM and are
+already inside "used"), the rest of used, and free.
+
+The snapshot golden was regenerated for the new layout, as was the
+`--text` golden for the memory lines.
+
+**psys calibrated against a battery gauge** (Dell XPS 14, the one
+machine with both): psys 6.42 W vs battery 6.26 W at idle (+2.5%), 55.8 W
+vs 60.6 W under a 16-thread load (-8%). That is the error bar for the
+system totals on the NUCs, which have no battery. The cable coming out
+12 s into a 60 s measurement was observed to make the report drop the
+gauge and fall back to psys, now with a note saying why.
+
+## Daemon efficiency
+
+A 40 s CPU profile of the idle daemon on the NUC (1s interval, ~295
+processes; `--pprof 127.0.0.1:6060` is a new opt-in flag for this):
+
+| Where | Share of daemon CPU |
+|---|---|
+| Per-process walk of `/proc` (GPU/NPU client discovery, top CPU processes) | 76% |
+| CPU collector (per-core frequency reads etc.) | 7% |
+| NPU, GPU, power collectors, history, everything else | under 5% combined |
+
+The hardware counters themselves are cheap; the cost is walking every
+process every second. Within that walk: listing each process's open
+files and `readlink` on every one of them (~870 per tick), reading each
+process's name, and reading each process's `stat`.
+
+**Done, no behaviour change:** process names are resolved only for the
+few processes that hold a GPU or NPU handle instead of all of them, and
+`/proc` is listed once per sample instead of twice. Idle daemon CPU went
+from 2.45% to about 2.1% of a core, and the process table matched the
+unmodified daemon running on the same machine.
+
+**Done, configurable: `collector.process_rescan` / `--process-rescan`.**
+The walk of the whole process table (open-file scan for GPU/NPU handles,
+and reading every process's CPU time for the top-CPU list) runs every
+`process_rescan` instead of every sample. Between walks only the handles
+already known are re-validated and re-read, one handle per DRM client
+(duplicate handles onto the same client are dropped at scan time rather
+than read and discarded every sample). Measured on the NUC, 60 s windows,
+~290 processes, 1s interval:
+
+| Configuration | Daemon CPU | vs. scan every sample |
+|---|---|---|
+| scan every sample (`0`, previous behaviour) | 2.17% | |
+| open-file rescan only, 5s | 1.62% | -25% |
+| open-file rescan only, 10s | 1.50% | -31% |
+| rescan + top-CPU list on the same cadence, 5s | 0.85% | -61% |
+| rescan + top-CPU list on the same cadence, 10s | 0.80% | -63% |
+
+In every run the GPU client table was identical to the unmodified
+daemon's, a client that exited vanished on the next sample (1 s), and a
+newly started GPU client appeared within the rescan interval (between 1 s
+and 11 s depending on where in the cycle it started).
+
+The default is `5s`: it captures almost all of the saving (10s gains
+another 0.05 points) at half the worst-case discovery delay. `0` restores
+the old behaviour exactly. What changes for a user at 5s: a new GPU/NPU
+process can take up to 5 s to show in the process table, and the top-CPU
+list updates every 5 s (its percentages are then averages over 5 s).
+Per-client GPU busy and memory, and every headline metric, are still
+per-sample.
+
+The web UI says so: each sample carries `processes.rescan_seconds`, and
+the process panels show "updates every 5s, averaged" beside the top-CPU
+title and "usage live · new processes appear within 5s" beside the GPU
+one. With `process_rescan: 0` the field is absent and no note is shown.
+
+**Options not taken:**
+
+| Option | Estimated saving | Trade-off |
+|---|---|---|
+| Skip the process walk entirely when no viewer is attached and Prometheus has not scraped recently | most of what remains of it | first sample after attaching has no process deltas |
+| Raise `collector.interval` | linear | coarser charts for everything |
+
+At 5s the remaining cost is spread thinly: reading the known GPU
+clients' `fdinfo` each sample, per-core CPU frequency reads, and the
+periodic walk itself.
+
 ## Open question: default intervals
 
 Two independent knobs exist:
