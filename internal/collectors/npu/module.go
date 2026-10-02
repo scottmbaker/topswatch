@@ -204,8 +204,10 @@ func (m *Module) collectPMT() []module.Metric {
 		})
 	}
 
-	// DDR bandwidth (cumulative KB counter → MB/s via delta).
-	// Source: Intel PMT XML tbw_KB datatype, bw_KB transform: raw / 1e3 = megabytes.
+	// DDR bandwidth (cumulative counter → MB/s via delta). One count is
+	// memoryBWUnit bytes (Intel PMT XML: tbw_KB on MTL/ARL, tbw_1024B on
+	// LNL/PTL). Verified on PTL against a synthetic NPU workload's own
+	// weight traffic to within 1%.
 	if raw, err := m.pmt.extractBits(m.regs.memoryBW); err == nil {
 		now := time.Now()
 		if m.prevMemBWSet {
@@ -215,7 +217,7 @@ func (m *Module) collectPMT() []module.Metric {
 			}
 			dT := now.Sub(m.prevMemBWTime).Seconds()
 			if dT > 0 {
-				mbps := float64(dRaw) / 1e3 / dT
+				mbps := float64(dRaw) * m.regs.memoryBWUnit / 1e6 / dT
 				metrics = append(metrics, module.Metric{
 					Name: "ddr_bandwidth", Value: mbps, Unit: "MB/s",
 				})
