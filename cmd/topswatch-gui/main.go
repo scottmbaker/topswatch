@@ -15,9 +15,12 @@ import (
 func main() {
 	connect := flag.String("connect", "", "daemon address (host, host:port, [v6]:port, or URL; default localhost:9876)")
 	refresh := flag.Duration("refresh", time.Second, "how often to fetch a new dashboard image")
+	energyPanel := flag.Bool("energy", false, "show the watt-hour panel (Start/Stop, Idle baseline, Clear; keys s, b, c)")
+	baseline := flag.Duration("baseline", 0, "length of an idle-baseline capture in the energy panel (default 10s)")
+	record := flag.Duration("record", 0, "length of the energy panel's timed recording (default 5m)")
 	flag.Parse()
 
-	if err := gui.Run(gui.Options{Addr: *connect, Refresh: *refresh}); err != nil {
+	if err := gui.Run(gui.Options{Addr: *connect, Refresh: *refresh, Energy: *energyPanel, Baseline: *baseline, Record: *record}); err != nil {
 		log.Fatalf("[gui] %v", err)
 	}
 }

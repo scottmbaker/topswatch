@@ -35,7 +35,7 @@ func TestStorePushUsesSharedDefinitions(t *testing.T) {
 		t.Errorf("gpu memory_used = %v GB, want ~1.94", v)
 	}
 	// npu ddr bandwidth is MB/s -> GB/s.
-	raw, _ := metricdef.Raw(testfixture.Sample(2).Metrics["npu"], metricdef.Cards["npu"][4])
+	raw, _ := metricdef.Raw(testfixture.Sample(2).Metrics["npu"], metricdef.Cards["npu"][3])
 	v, _ = st.last("npu", "ddr_bandwidth")
 	if v != raw/1000 {
 		t.Errorf("ddr_bandwidth = %v, want %v", v, raw/1000)
@@ -82,15 +82,15 @@ func TestSparkline(t *testing.T) {
 }
 
 func TestComputeLayout(t *testing.T) {
-	l := computeLayout(120, 50, 3)
+	l := computeLayout(120, 50, 3, 0)
 	if l.chartH < minChartH {
 		t.Fatalf("tall terminal got chartH %d", l.chartH)
 	}
-	l = computeLayout(80, 18, 3)
+	l = computeLayout(80, 18, 3, 0)
 	if l.chartH != 0 || !l.gap {
 		t.Fatalf("short terminal should drop charts but keep gaps, got %+v", l)
 	}
-	l = computeLayout(60, 16, 3)
+	l = computeLayout(60, 16, 3, 0)
 	if l.chartH != 0 || l.gap {
 		t.Fatalf("very short terminal should drop gaps too, got %+v", l)
 	}
@@ -104,13 +104,15 @@ func TestRenderFrame(t *testing.T) {
 		mode:    "stream",
 		devices: testfixture.Devices(),
 		store:   fixtureStore(90),
+		mem:     metricdef.MemoryBar{Total: 32, Used: 12.5, GPU: 1.9},
+		hasMem:  true,
 		warnings: []collector.Warning{{
 			Module: "cpu", Kind: "thermal", Severity: "critical", Message: "package 99C",
 		}},
 	}
 	for _, size := range [][2]int{{120, 50}, {80, 24}, {60, 16}} {
 		w, h := size[0], size[1]
-		out := render(f, computeLayout(w, h, 3))
+		out := render(f, computeLayout(w, h, 3, 1))
 		lines := strings.Split(out, "\n")
 		if len(lines) > h {
 			t.Errorf("%dx%d: rendered %d lines, exceeds height", w, h, len(lines))
@@ -120,7 +122,7 @@ func TestRenderFrame(t *testing.T) {
 				t.Errorf("%dx%d: line %d is %d cells wide: %q", w, h, i, lw, ln)
 			}
 		}
-		for _, want := range []string{"TopsWatch", "CPU", "NPU", "GPU", "UTIL", "package 99C"} {
+		for _, want := range []string{"TopsWatch", "CPU", "NPU", "GPU", "UTIL", "SOC TEMP", "GB used", "package 99C"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("%dx%d: output missing %q", w, h, want)
 			}
@@ -135,9 +137,26 @@ func TestHeaderStripsScheme(t *testing.T) {
 	}
 }
 
+func TestMemoryBar(t *testing.T) {
+	mb := metricdef.MemoryBar{Total: 64, Used: 16, GPU: 4}
+	out := renderMemoryBar(mb, 100)
+	if lipglossWidth(out) > 100 {
+		t.Fatalf("bar too wide: %d", lipglossWidth(out))
+	}
+	for _, want := range []string{"16.0 GB used", "GPU 4.0", "48.0 free of 64 GB"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("bar missing %q: %s", want, out)
+		}
+	}
+	// Narrow terminal: numbers only, still within width.
+	if n := renderMemoryBar(mb, 40); lipglossWidth(n) > 40 {
+		t.Fatalf("narrow bar too wide: %d", lipglossWidth(n))
+	}
+}
+
 func TestRenderEmptyStore(t *testing.T) {
 	f := frame{addr: "x", now: time.Now(), tier: "5min", devices: testfixture.Devices(), store: newStore()}
-	out := render(f, computeLayout(100, 40, 3))
+	out := render(f, computeLayout(100, 40, 3, 0))
 	if !strings.Contains(out, "--") {
 		t.Fatal("expected placeholder values before first sample")
 	}

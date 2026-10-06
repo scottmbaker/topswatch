@@ -43,6 +43,7 @@ claim.
 | Temperature | °C | hwmon `coretemp`/`k10temp` |
 | Per-core utilization | % | `/proc/stat` per-cpu lines |
 | Per-core frequency | MHz | per-cpu `scaling_cur_freq` |
+| System memory used / total | bytes | `/proc/meminfo` (`MemTotal - MemAvailable`) |
 
 Per-core metrics carry `core` and `core_type` (`performance`/`efficient`/`low_power`) labels.
 
@@ -54,7 +55,7 @@ Per-core metrics carry `core` and `core_type` (`performance`/`efficient`/`low_po
 | Per-engine busy | % | Same, per engine label |
 | Frequency (actual/requested/min/max/rp0/rpe/rpn) | MHz | Xe sysfs `tile*/gt*/freq0/` or i915 `gt_*_freq_mhz` |
 | Temperature | °C | hwmon `temp*_input` (when xe_hwmon present) |
-| Power | W | RAPL `uncore` energy_uj (delta) |
+| Power | W | RAPL `uncore` energy_uj (delta); falls back to the GT energy counter in Intel PMT where the kernel registers no uncore zone (a boot-time race in the RAPL driver; `modprobe -r intel_rapl_msr && modprobe intel_rapl_msr` restores the zone) |
 
 Supports both the Xe driver (Panther Lake, Lunar Lake) and i915 driver
 (older platforms) automatically.
@@ -67,9 +68,24 @@ Supports both the Xe driver (Panther Lake, Lunar Lake) and i915 driver
 | Frequency | MHz | PMT `VPU_WORKPOINT` register |
 | Power | W | PMT `VPU_ENERGY` register (delta, U18.14 fixed-point) |
 | Temperature | °C | PMT `SOC_TEMPERATURES` register |
-| DDR Bandwidth | MB/s | PMT `VPU_MEMORY_BW` register (delta, bw_KB) |
+| DDR Bandwidth | MB/s | PMT `VPU_MEMORY_BW` register (delta; 1000-byte counts on MTL/ARL, 1024-byte on LNL/PTL) |
 | Tile Config | count | PMT `VPU_WORKPOINT` register |
 | Memory Used | bytes | sysfs `npu_memory_utilization` (PTL+) |
+
+### Power and energy
+
+| Metric | Unit | Source |
+|--------|------|--------|
+| Energy per RAPL domain (`package`, `core`, `uncore`, `dram`, `psys`) | J, cumulative | RAPL `energy_uj` for every zone the platform exposes |
+| Power per RAPL domain | W | same counters (delta) |
+| NPU energy | J, cumulative | PMT `VPU_ENERGY` register |
+| System power and energy | W / J | battery fuel gauge (`power_supply`), **only while discharging** |
+| Battery capacity, voltage, state | %, V | `power_supply` |
+
+This collector adapts to the hardware: a desktop with no battery, a
+board with no `psys` or no `uncore` domain, or a machine that hides RAPL
+simply reports fewer domains. Nothing is an error. See
+[Measuring energy](#measuring-energy-watt-hours).
 
 See [METRICS.md](METRICS.md) for full details on sources, computation,
 and Prometheus metric names.
@@ -146,6 +162,7 @@ Flags:
 |---|---|---|
 | `--connect ADDR` | `localhost:9876` | daemon to attach to: `host`, `host:port`, `[v6addr]:port`, or `http://…` |
 | `--refresh N` | `0` (stream) | `0` follows the daemon's SSE stream and redraws once per sample; `N` (e.g. `5s`) polls instead, for a slower, cheaper display |
+| `--energy` | off | add the watt-hour panel and its keys (s/b/c); see [Measuring energy](#measuring-energy-watt-hours) |
 
 Keys: `q` quit · `r` cycle history range (5min / 1h / 24h) · `p` pause.
 
@@ -256,11 +273,166 @@ inside a pod. `kubectl exec` does not pass your `TERM` through and the
 distroless image has no way to set it, so expect a monochrome display
 that way; `port-forward` gives the full-colour one.
 
+## Measuring energy (watt-hours)
+
+The daemon keeps cumulative energy counters, so any client can bracket a
+test, benchmark or demo and report how much energy it used, broken down
+by component.
+
+![A metered test in topswatch-gui: a 30-second CPU load on a Panther Lake laptop running on battery, with an idle baseline](docs/images/topswatch-energy.png)
+
+*A 30-second, 16-thread CPU load on a Dell XPS 14 on battery, after a
+16-second idle baseline. The system total is measured by the battery
+gauge: 371.0 mWh in all, of which the demo itself cost 318.8 mWh on top
+of the 52 mWh the laptop would have used anyway at its 6.3 W steady
+state.*
+
+### How the counters work
+
+- **The daemon is an odometer.** Every energy source it reads is a
+  cumulative counter: RAPL's `energy_uj` files for the SoC package,
+  CPU cores, GPU, DRAM and (where present) the platform, Intel PMT's
+  energy registers for the NPU and, on kernels that hide the GPU's RAPL
+  zone, the GPU, and the battery's current and voltage integrated over
+  time. The daemon turns each into joules accumulated since it started
+  and exports that number on every sample. It never resets while
+  running.
+- **A measurement is two readings and a subtraction.** Start and stop
+  are just samples; nothing has to be armed. Divide joules by 3600 for
+  watt-hours and by elapsed seconds for average watts. Because the
+  underlying counters are cumulative there is no sampling error from
+  the poll interval, and a slower interval loses nothing.
+- **The rows add up without double counting.** RAPL domains nest: the
+  package already contains the cores, the GPU and the NPU, and the
+  system contains everything. The report shows components plus the
+  remainders ("SoC other" is the package minus cores, GPU and NPU;
+  "Rest of system" is the system minus the SoC and DRAM) so the rows
+  sum to the totals.
+- **"Above idle" is the demo's own cost.** An idle baseline records
+  average watts per row while the device sits in the state the demo
+  will run in. For a later run, steady state is idle watts times the
+  run's seconds and the demo itself is the total minus that.
+- **Battery readings are only trusted while the battery is powering
+  the device.** On external power a gauge shows charging, or nothing.
+  The daemon counts battery energy only while discharging, checks that
+  the battery is supplying at least what the SoC alone draws (a full
+  battery on a device fed through an unreported port can claim
+  "Discharging" while supplying nothing), and records how many seconds
+  it actually covered. A client accepts the battery total only when
+  that coverage matches the window; otherwise it falls back to `psys`
+  or reports no system total, and says why.
+- **Bad ticks are dropped, not folded in.** A single-sample jump that
+  implies kilowatts means a counter reset or an early wrap (a known
+  firmware issue with `psys` today), and that sample is skipped rather
+  than corrupting the total.
+
+### What `psys` means
+
+`psys` is the platform energy counter some boards expose through RAPL
+(the NUCs and the Dell here; not the Seco F36). It is the SoC's estimate
+of power drawn from the voltage regulators feeding the whole platform,
+so it includes the display, memory and peripherals but **not the losses
+in the power supply or charger**, and it is a model, not a meter.
+Measured against a battery gauge on the one machine with both, it read
+2.5% high at idle and 8% low under a 16-thread load. Treat a `psys`
+system total as good to about 10%, biased low under heavy load. When a
+device has both, the report prefers the battery while it is discharging
+and uses `psys` otherwise, and the footnote says which was used.
+Without either, the SoC total is the widest figure available and the
+report says so rather than guessing.
+
+Three ways to trigger a measurement, all off by default so the normal
+display stays uncluttered:
+
+**1. Stopwatch in the terminal viewer**
+
+```bash
+./topswatch --tui --energy
+```
+
+`s` starts and stops a measurement, `t` records for a fixed time (5
+minutes by default, `--record 10m` to change) and stops by itself, `c`
+clears, and `b` captures an idle baseline (10s by default, `--baseline
+30s` to change). The panel is one line until you start; while measuring
+it shows a live table.
+
+**2. Wrap a command**, like `time`:
+
+```bash
+./topswatch --measure -- ./run-benchmark.sh
+./topswatch --measure --baseline 10s -- python3 infer.py   # also report energy above idle
+./topswatch --measure --json -- ./run-benchmark.sh 2> energy.json
+./topswatch --measure --for 5m                             # no command: a demo already running
+```
+
+The command's own output is untouched; the report goes to stderr and the
+command's exit code is passed through. `--connect` points it at a remote
+daemon.
+
+**3. Buttons in the desktop viewer**
+
+```bash
+./topswatch-gui --energy
+```
+
+adds Start/Stop, Record 5 min, Idle baseline and Clear beside the
+dashboard (or under it on a tall window); each button shows its key:
+`s`, `t`, `b`, `c`. `--record 10m` changes the recording length.
+
+**What the report looks like** (a 20-second, 8-thread CPU load on a Core
+Ultra 5 335, with a 10s idle baseline):
+
+```
+                       energy     avg W  share    idle W   above idle
+  CPU cores         254.3 mWh     43.60    72%      0.10    253.7 mWh
+  GPU                 3.8 mWh      0.65     1%      0.57      0.4 mWh
+  NPU                 0.0 mWh      0.00     0%      0.00      0.0 mWh
+  SoC other          12.5 mWh      2.14     4%      1.78      2.1 mWh
+SoC total           270.6 mWh     46.38    76%      2.46    256.2 mWh
+  DRAM                2.8 mWh      0.49     1%      0.48      0.0 mWh
+  Rest of system     81.5 mWh     13.96    23%      4.56     54.9 mWh
+System total        354.9 mWh     60.83   100%      7.50    311.1 mWh
+```
+
+**How to read it**
+
+- The rows add up without double counting. RAPL's `package` domain
+  already contains the CPU cores, the GPU (`uncore`) and the NPU, so
+  "SoC other" is the remainder of the package, and "Rest of system" is
+  the system total minus the SoC and DRAM: display, storage, radios and
+  conversion losses. Display power cannot be read separately.
+- **System total** comes from the battery gauge on battery-powered
+  devices, which is a real whole-device measurement, or from RAPL `psys`
+  where a board has it (measured against a battery gauge: within about
+  10%, reading low under heavy load). With neither, or on a battery device that was on
+  external power during the run (the gauge then shows charging, not
+  system draw), the report says "n/a" and explains why rather than
+  guessing.
+- **Above idle** subtracts the idle power from the baseline, which is the
+  figure to quote for "what did this workload cost".
+- SoC figures are the processor's own RAPL estimates, not a wall-meter
+  reading. Runs shorter than about 30 seconds are noisy, particularly the
+  battery-based system total.
+
+To build your own energy counter on these numbers, or to script a
+start/stop "trip meter" around a demo, see [ENERGY.md](ENERGY.md) and
+[`examples/energy_odometer.py`](examples/energy_odometer.py).
+
+Energy counters need the daemon to run as root, which every deployment
+here already does (`sudo`, `--privileged` in Docker, the Helm
+DaemonSet). They are also exported to Prometheus as
+`topswatch_power_energy_joules_total{domain=...}` and
+`topswatch_npu_energy_joules_total`, so `increase(...[1h]) / 3600` gives
+watt-hours over any window in Grafana. The collector can be turned off
+with `collectors.power.enabled: false`.
+
 ## Output Modes
 
 - **`--text`** — Collect metrics twice (1s apart for deltas), print to stdout, exit.
 - **`--tui`** — Terminal dashboard attached to a running daemon
-  (`--connect`, `--refresh`); collects nothing itself. See [Viewers](#viewers).
+  (`--connect`, `--refresh`, `--energy`); collects nothing itself. See [Viewers](#viewers).
+- **`--measure -- command`** — Run a command and report the energy it
+  used. See [Measuring energy](#measuring-energy-watt-hours).
 - **Default** (no flags) — Start HTTP server with web dashboard, JSON API,
   SSE stream, and Prometheus endpoint.
 
@@ -287,6 +459,7 @@ server:
 collector:
   interval: 1s
   history: 300
+  process_rescan: 5s   # walk all processes this often; 0 = every interval
 
 collectors:
   cpu:
@@ -295,10 +468,23 @@ collectors:
     enabled: true
   npu:
     enabled: true
+  power:        # RAPL energy domains and battery; adapts to what exists
+    enabled: true
 ```
 
 All config values can be overridden via CLI flags (`--address`, `--port`,
-`--interval`). Viewer modes (`--tui`, `topswatch-gui`) do not read the
+`--interval`, `--process-rescan`).
+
+`process_rescan` is the daemon's main efficiency setting. Finding GPU and
+NPU clients and ranking processes by CPU means walking every process on
+the system, which costs more than reading all the hardware counters
+combined. That walk runs every `process_rescan`; in between, the clients
+already known are still read every `interval`, so per-client GPU usage
+and memory stay current and a client that exits disappears at once. The
+visible effect is that a newly started GPU or NPU process can take up to
+`process_rescan` to appear in the process table, and the top-CPU list
+updates at that cadence. On a Core Ultra 5 335 the idle daemon uses 2.2%
+of a core at `0` and 0.85% at `5s`. Viewer modes (`--tui`, `topswatch-gui`) do not read the
 config file; they take `--connect` and `--refresh` only.
 
 ## Supported Platforms

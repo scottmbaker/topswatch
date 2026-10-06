@@ -305,6 +305,15 @@ header h1 span {
   letter-spacing: 0.5px;
   margin-bottom: 6px;
 }
+
+/* Freshness note beside a process list title (see renderProcNotes). */
+.proc-note {
+  margin-left: 10px;
+  text-transform: none;
+  letter-spacing: 0;
+  opacity: 0.75;
+}
+.proc-note:empty { display: none; }
 .proc-table {
   width: 100%;
   border-collapse: collapse;

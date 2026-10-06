@@ -28,6 +28,9 @@ var (
 	cText    = color.RGBA{0xe6, 0xed, 0xf3, 0xff}
 	cTextDim = color.RGBA{0x8b, 0x94, 0x9e, 0xff}
 	cAccent  = color.RGBA{0x58, 0xa6, 0xff, 0xff}
+	// cBarFree is the "free" segment of the memory bar: lighter than the
+	// card background so the empty part of the bar reads as a bar.
+	cBarFree = color.RGBA{0x2d, 0x33, 0x3b, 0xff}
 	// Per-metric series colors come from metricdef (see hexColor).
 )
 
@@ -75,7 +78,18 @@ const (
 	chartH      = 100
 	infoH       = 110
 	moduleGap   = 8
+	memBarH     = 18 // stacked system-memory bar under the CPU cards
 )
+
+// moduleHeight is a module section's height; the CPU section carries the
+// memory bar when the daemon reports system memory.
+func moduleHeight(mod string, hasMem bool) int {
+	h := sectionHdrH + cardH + 6 + chartH + moduleGap
+	if mod == "cpu" && hasMem {
+		h += memBarH
+	}
+	return h
+}
 
 func renderSnapshot(devices map[string]module.DeviceInfo, hist []collector.Sample) image.Image {
 	// Determine which modules to render (only those present in devices).
@@ -86,9 +100,19 @@ func renderSnapshot(devices map[string]module.DeviceInfo, hist []collector.Sampl
 		}
 	}
 
+	// Latest sample feeds the memory bar.
+	var mem metricdef.MemoryBar
+	hasMem := false
+	if len(hist) > 0 {
+		last := hist[len(hist)-1]
+		mem, hasMem = metricdef.Memory(last.Metrics["cpu"], last.Metrics["gpu"])
+	}
+
 	// Compute height.
-	moduleH := sectionHdrH + cardH + 6 + chartH + moduleGap
-	h := snapPad + headerH + len(modules)*moduleH + infoH + snapPad
+	h := snapPad + headerH + infoH + snapPad
+	for _, name := range modules {
+		h += moduleHeight(name, hasMem)
+	}
 
 	img := image.NewRGBA(image.Rect(0, 0, snapW, h))
 	c := &snapCanvas{img: img, w: snapW, h: h}
@@ -107,8 +131,8 @@ func renderSnapshot(devices map[string]module.DeviceInfo, hist []collector.Sampl
 	// --- Module sections ---
 	y := snapPad + headerH
 	for _, name := range modules {
-		drawModuleSection(c, name, y, hist)
-		y += moduleH
+		drawModuleSection(c, name, y, hist, mem, hasMem)
+		y += moduleHeight(name, hasMem)
 	}
 
 	// --- Info panel ---
@@ -117,7 +141,7 @@ func renderSnapshot(devices map[string]module.DeviceInfo, hist []collector.Sampl
 	return img
 }
 
-func drawModuleSection(c *snapCanvas, mod string, y int, hist []collector.Sample) {
+func drawModuleSection(c *snapCanvas, mod string, y int, hist []collector.Sample, mem metricdef.MemoryBar, hasMem bool) {
 	defs := metricdef.Cards[mod]
 	if len(defs) == 0 {
 		return
@@ -138,9 +162,51 @@ func drawModuleSection(c *snapCanvas, mod string, y int, hist []collector.Sample
 		drawCard(c, cx, cardsY, w, cardH, def, mod, hist)
 	}
 
-	// Chart
+	// Memory bar (CPU section only)
 	chartY := cardsY + cardH + 6
+	if mod == "cpu" && hasMem {
+		drawMemoryBar(c, snapPad, chartY, snapW-2*snapPad, memBarH-6, mem)
+		chartY += memBarH
+	}
+
+	// Chart
 	drawChart(c, snapPad, chartY, snapW-2*snapPad, chartH, mod, hist)
+}
+
+// drawMemoryBar draws system RAM as a stacked bar: GPU buffers (part of
+// "used" on an integrated GPU), the rest of used, and free, with the
+// numbers to the right.
+func drawMemoryBar(c *snapCanvas, x, y, w, h int, mb metricdef.MemoryBar) {
+	label := "MEM"
+	text := fmt.Sprintf("%.1f GB used", mb.Used)
+	if mb.GPU > 0 {
+		text += fmt.Sprintf(" (GPU %.1f)", mb.GPU)
+	}
+	text += fmt.Sprintf("  %.1f free of %.0f GB", mb.Total-mb.Used, mb.Total)
+	labelW := len(label)*7 + 8
+	textW := len(text)*7 + 8
+	barX := x + labelW
+	barW := w - labelW - textW
+	if barW < 40 {
+		return
+	}
+	c.text(x, y+h-3, label, cTextDim)
+	c.fill(barX, y, barW, h, cBarFree)
+	c.rectBorder(barX, y, barW, h, cTextDim)
+	frac := func(gb float64) int { return int(gb / mb.Total * float64(barW-2)) }
+	g := frac(mb.GPU)
+	u := frac(mb.Used) - g
+	if u < 0 {
+		u = 0
+	}
+	c.fill(barX+1, y+1, g, h-2, hexColor(metricdef.ColorPurple))
+	c.fill(barX+1+g, y+1, u, h-2, cAccent)
+	// A 1px seam between GPU and the rest of "used" so two filled
+	// segments stay distinguishable at a glance.
+	if g > 0 && u > 0 {
+		c.fill(barX+1+g, y+1, 1, h-2, cBg)
+	}
+	c.text(barX+barW+8, y+h-3, text, cText)
 }
 
 func drawCard(c *snapCanvas, x, y, w, h int, def metricdef.Def, mod string, hist []collector.Sample) {

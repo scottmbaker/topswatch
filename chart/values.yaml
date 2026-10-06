@@ -28,6 +28,8 @@ config:
     interval: 1s
     # -- Number of samples in the short-tier ring buffer
     history: 300
+    # -- How often to walk every process for new GPU/NPU clients and the top-CPU list (0 = every interval)
+    processRescan: 5s
   collectors:
     cpu:
       # -- Enable CPU metrics (utilization, frequency, power, temperature)
@@ -37,6 +39,9 @@ config:
       enabled: true
     npu:
       # -- Enable NPU metrics (utilization, frequency, power, temperature via PMT)
+      enabled: true
+    power:
+      # -- Enable energy counters (RAPL domains, battery system power where present)
       enabled: true
 
 # -- Container resource limits/requests (e.g. {limits: {cpu: 100m, memory: 64Mi}})

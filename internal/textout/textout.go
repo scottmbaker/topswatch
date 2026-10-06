@@ -27,6 +27,8 @@ func PrintSample(w io.Writer, s collector.Sample) {
 			printGPU(w, dev, s.Metrics[name])
 		case "npu":
 			printNPU(w, dev, s.Metrics[name])
+		case "power":
+			printPower(w, dev, s.Metrics[name])
 		default:
 			fmt.Fprintf(w, "%s\n", name)
 			printMetricList(w, s.Metrics[name])
@@ -80,6 +82,42 @@ func printNPU(w io.Writer, dev module.DeviceInfo, metrics []module.Metric) {
 	if len(metrics) > 0 {
 		fmt.Fprintln(w)
 		printMetricList(w, metrics)
+	}
+}
+
+// printPower lists instantaneous power per energy domain and the battery
+// state. Cumulative energy is left to the viewers and --measure, where a
+// start point gives it meaning.
+func printPower(w io.Writer, dev module.DeviceInfo, metrics []module.Metric) {
+	fmt.Fprintln(w, "Power")
+	names := map[string]string{
+		"package": "SoC package", "core": "CPU cores", "uncore": "GPU (uncore)",
+		"dram": "DRAM", "psys": "Platform (psys)", "battery": "System (battery)",
+	}
+	for _, d := range []string{"package", "core", "uncore", "dram", "psys", "battery"} {
+		for _, m := range metrics {
+			if m.Name == "power" && m.Labels["domain"] == d {
+				field(w, names[d], fmt.Sprintf("%.4g W", m.Value))
+			}
+		}
+	}
+	for _, m := range metrics {
+		if len(m.Labels) > 0 {
+			continue
+		}
+		switch m.Name {
+		case "battery_capacity":
+			field(w, "Battery", fmt.Sprintf("%.0f %%", m.Value))
+		case "battery_discharging":
+			state := "on external power"
+			if m.Value == 1 {
+				state = "discharging"
+			}
+			field(w, "Battery state", state)
+		}
+	}
+	if src := dev.Extra["system_source"]; src == "none" {
+		field(w, "System total", "not available on this device")
 	}
 }
 

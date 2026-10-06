@@ -12,6 +12,7 @@ data:
     collector:
       interval: {{ .Values.config.collector.interval }}
       history: {{ .Values.config.collector.history }}
+      process_rescan: {{ dig "processRescan" "5s" .Values.config.collector }}
     collectors:
       cpu:
         enabled: {{ .Values.config.collectors.cpu.enabled }}
@@ -19,3 +20,5 @@ data:
         enabled: {{ .Values.config.collectors.gpu.enabled }}
       npu:
         enabled: {{ .Values.config.collectors.npu.enabled }}
+      power:
+        enabled: {{ dig "power" "enabled" true .Values.config.collectors }}

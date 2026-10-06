@@ -39,6 +39,8 @@ func Devices() map[string]module.DeviceInfo {
 	}
 }
 
+const gib = 1024 * 1024 * 1024
+
 // wave returns base + amp*sin(i/period), rounded to 3 decimals.
 func wave(i int, base, amp, period float64) float64 {
 	v := base + amp*math.Sin(float64(i)/period)
@@ -67,6 +69,9 @@ func Sample(i int) collector.Sample {
 		m("frequency", wave(i, 2600, 500, 7), "MHz"),
 		m("power", wave(i, 12, 4, 5), "W"),
 		m("temperature", wave(i, 58, 6, 13), "C"),
+		m("memory_used", 12.5*gib+float64(i%9)*256e6, "bytes"),
+		m("memory_total", 32*gib, "bytes"),
+		m("memory_used_percent", wave(i, 39, 2, 9), "%"),
 	}
 	types := []string{"performance", "performance", "performance", "performance",
 		"efficient", "efficient", "low_power", "low_power"}
@@ -95,7 +100,6 @@ func Sample(i int) collector.Sample {
 		gpu = append(gpu, ml("busy", wave(i+len(eng), 30, 30, 7), "%",
 			map[string]string{"engine": eng}))
 	}
-	const gib = 1024 * 1024 * 1024
 	classMem := map[string]float64{
 		"compute": 1.25 * gib, "graphics": 0.5 * gib, "compute+graphics": 0,
 		"video": 0.125 * gib, "idle": 0.0625 * gib,
