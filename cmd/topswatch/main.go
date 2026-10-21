@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/scottmbaker/topswatch/internal/affinity"
 	"github.com/scottmbaker/topswatch/internal/collector"
 	"github.com/scottmbaker/topswatch/internal/collectors/cpu"
 	"github.com/scottmbaker/topswatch/internal/collectors/gpu"
@@ -30,6 +31,7 @@ func main() {
 	interval := flag.Duration("interval", 0, "override poll interval")
 	pprofAddr := flag.String("pprof", "", "serve Go profiling endpoints on this address (e.g. 127.0.0.1:6060); off by default")
 	processRescan := flag.Duration("process-rescan", -1, "how often to walk all processes for new GPU/NPU clients and the top-CPU list (default 5s, 0 = every sample); overrides collector.process_rescan")
+	cpus := flag.String("cpus", "", "confine the daemon to these CPUs: low_power, efficient, performance, or a list like 12-15; overrides collector.cpus")
 	tuiMode := flag.Bool("tui", false, "terminal dashboard attached to a running daemon, then exit")
 	connect := flag.String("connect", "", "daemon address for --tui (host, host:port, [v6]:port, or URL; default localhost:9876)")
 	refresh := flag.Duration("refresh", 0, "viewer refresh interval for --tui; 0 follows the daemon's own sample stream")
@@ -83,6 +85,24 @@ func main() {
 	}
 	if *processRescan >= 0 {
 		cfg.Collector.ProcessRescan = *processRescan
+	}
+	if *cpus != "" {
+		cfg.Collector.CPUs = *cpus
+	}
+
+	// Pin before any collector starts a thread of its own.
+	if spec := cfg.Collector.CPUs; spec != "" {
+		byType, err := cpu.CPUsByType()
+		if err != nil {
+			log.Printf("[affinity] cpu topology unavailable: %v", err)
+		}
+		if list, err := affinity.Resolve(spec, byType); err != nil {
+			log.Fatalf("[affinity] cpus %q: %v", spec, err)
+		} else if err := affinity.Pin(list); err != nil {
+			log.Fatalf("[affinity] cannot pin to cpus %s: %v", affinity.Format(list), err)
+		} else {
+			log.Printf("[affinity] daemon confined to cpus %s (%s)", affinity.Format(list), spec)
+		}
 	}
 
 	// Init modules

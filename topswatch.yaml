@@ -12,6 +12,9 @@ collector:
   # How often to walk every process (new GPU/NPU clients, top-CPU list).
   # Known clients are still read every interval. 0 = walk every interval.
   process_rescan: 5s
+  # Confine the daemon to these CPUs: low_power, efficient, performance,
+  # or a list like 12-15. Unset = wherever the scheduler puts it.
+  # cpus: low_power
 
 # Collector modules
 collectors:

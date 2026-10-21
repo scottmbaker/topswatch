@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/scottmbaker/topswatch/internal/sysfile"
 )
 
 // readSysfsString reads a sysfs file and returns its trimmed contents.
@@ -17,32 +19,19 @@ func readSysfsString(path string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-// readSysfsUint64 reads a sysfs file containing a decimal integer.
-func readSysfsUint64(path string) (uint64, error) {
-	s, err := readSysfsString(path)
-	if err != nil {
-		return 0, err
-	}
-	return strconv.ParseUint(s, 10, 64)
+// openBusyTime holds open the NPU busy time counter (microseconds).
+func openBusyTime(sysfsDir string) (*sysfile.File, error) {
+	return sysfile.OpenUint(filepath.Join(sysfsDir, "npu_busy_time_us"))
 }
 
-// readBusyTimeUs reads the NPU busy time counter in microseconds.
-func readBusyTimeUs(sysfsDir string) (uint64, error) {
-	return readSysfsUint64(filepath.Join(sysfsDir, "npu_busy_time_us"))
-}
-
-// readMemoryUtilization reads the NPU memory usage (PTL+ only).
-// Returns the raw string value. Returns empty string if not available.
-func readMemoryUtilization(sysfsDir string) (string, error) {
-	path := filepath.Join(sysfsDir, "npu_memory_utilization")
-	s, err := readSysfsString(path)
+// openMemoryUtilization holds open the NPU memory usage attribute (PTL+
+// only); nil where the kernel does not provide it.
+func openMemoryUtilization(sysfsDir string) *sysfile.File {
+	f, err := sysfile.Open(filepath.Join(sysfsDir, "npu_memory_utilization"))
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", err
+		return nil
 	}
-	return s, nil
+	return f
 }
 
 // readFirmwareVersion reads the firmware version from debugfs and returns

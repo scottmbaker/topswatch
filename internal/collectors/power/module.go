@@ -19,12 +19,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/scottmbaker/topswatch/internal/collectors/socpmt"
 	"github.com/scottmbaker/topswatch/internal/module"
+	"github.com/scottmbaker/topswatch/internal/sysfile"
 )
 
 // Domain names used in the "domain" label.
@@ -38,12 +38,12 @@ const (
 )
 
 type zone struct {
-	domain     string
-	energyPath string // RAPL sysfs energy_uj; empty for a PMT-backed zone
-	maxRange   uint64
-	prev       uint64
-	prevSet    bool
-	warned     bool
+	domain   string
+	energy   *sysfile.File // RAPL sysfs energy_uj, held open; nil for a PMT-backed zone
+	maxRange uint64
+	prev     uint64
+	prevSet  bool
+	warned   bool
 	// pmt, when set, supplies the GT (GPU) energy from the SoC telemetry
 	// region instead of sysfs. Same counter as the uncore MSR; used when
 	// the kernel registers no RAPL uncore zone.
@@ -56,7 +56,7 @@ func (z *zone) readUJ() (uint64, error) {
 		j, err := z.pmt.GTEnergyJoules()
 		return uint64(j * 1e6), err
 	}
-	return readUint(z.energyPath)
+	return z.energy.Uint()
 }
 
 // A fuel gauge's "Discharging" status is not proof that the battery is
@@ -84,6 +84,10 @@ type battery struct {
 	dir   string
 	name  string
 	model string
+
+	// Attributes held open; power or current may be nil (one of the two
+	// exists), the rest are optional too.
+	status, capacity, voltage, power, current *sysfile.File
 
 	prevWatts       float64
 	prevTime        time.Time
@@ -157,13 +161,13 @@ func (m *Module) discoverRAPL() {
 		if strings.HasPrefix(domain, "package-") {
 			domain = DomainPackage
 		}
-		energyPath := filepath.Join(p, "energy_uj")
-		if _, err := readUint(energyPath); err != nil {
+		f, err := sysfile.OpenUint(filepath.Join(p, "energy_uj"))
+		if err != nil {
 			unreadable = append(unreadable, domain)
 			continue
 		}
-		maxRange, _ := readUint(filepath.Join(p, "max_energy_range_uj"))
-		m.zones = append(m.zones, &zone{domain: domain, energyPath: energyPath, maxRange: maxRange})
+		maxRange, _ := sysfile.ReadUint(filepath.Join(p, "max_energy_range_uj"))
+		m.zones = append(m.zones, &zone{domain: domain, energy: f, maxRange: maxRange})
 	}
 	if len(unreadable) > 0 {
 		log.Printf("[power] RAPL domains not readable (need root): %s", strings.Join(unreadable, " "))
@@ -195,13 +199,17 @@ func (m *Module) discoverBattery() {
 			continue
 		}
 		// Need either power_now, or voltage_now and current_now.
-		_, pErr := readInt(filepath.Join(d, "power_now"))
-		_, vErr := readInt(filepath.Join(d, "voltage_now"))
-		_, iErr := readInt(filepath.Join(d, "current_now"))
-		if pErr != nil && (vErr != nil || iErr != nil) {
+		b := &battery{dir: d, name: filepath.Base(d), model: readString(filepath.Join(d, "model_name"))}
+		b.power = openInt(filepath.Join(d, "power_now"))
+		b.voltage = openInt(filepath.Join(d, "voltage_now"))
+		b.current = openInt(filepath.Join(d, "current_now"))
+		if b.power == nil && (b.voltage == nil || b.current == nil) {
+			b.close()
 			continue
 		}
-		m.bat = &battery{dir: d, name: filepath.Base(d), model: readString(filepath.Join(d, "model_name"))}
+		b.status, _ = sysfile.Open(filepath.Join(d, "status"))
+		b.capacity = openInt(filepath.Join(d, "capacity"))
+		m.bat = b
 		return
 	}
 }
@@ -314,21 +322,24 @@ func (m *Module) collectBattery(now time.Time, pkgWatts float64, havePkg bool) [
 	b := m.bat
 	var out []module.Metric
 
-	status := readString(filepath.Join(b.dir, "status"))
+	status := ""
+	if b.status != nil {
+		status, _ = b.status.String()
+	}
 	discharging := status == "Discharging"
-	if c, err := readInt(filepath.Join(b.dir, "capacity")); err == nil {
+	if c, ok := heldInt(b.capacity); ok {
 		out = append(out, module.Metric{Name: "battery_capacity", Value: float64(c), Unit: "%"})
 	}
 	volts := math.NaN()
-	if v, err := readInt(filepath.Join(b.dir, "voltage_now")); err == nil {
+	if v, ok := heldInt(b.voltage); ok {
 		volts = float64(v) / 1e6
 		out = append(out, module.Metric{Name: "battery_voltage", Value: volts, Unit: "V"})
 	}
 
 	watts, ok := 0.0, false
-	if p, err := readInt(filepath.Join(b.dir, "power_now")); err == nil {
+	if p, pok := heldInt(b.power); pok {
 		watts, ok = math.Abs(float64(p))/1e6, true
-	} else if i, err := readInt(filepath.Join(b.dir, "current_now")); err == nil && !math.IsNaN(volts) {
+	} else if i, iok := heldInt(b.current); iok && !math.IsNaN(volts) {
 		watts, ok = volts*math.Abs(float64(i))/1e6, true
 	}
 
@@ -384,30 +395,51 @@ func (m *Module) collectBattery(now time.Time, pkgWatts float64, havePkg bool) [
 	return out
 }
 
-func (m *Module) Close() error { return nil }
+func (m *Module) Close() error {
+	for _, z := range m.zones {
+		z.energy.Close() //nolint:errcheck
+	}
+	if m.bat != nil {
+		m.bat.close()
+	}
+	return nil
+}
+
+func (b *battery) close() {
+	for _, f := range []*sysfile.File{b.status, b.capacity, b.voltage, b.power, b.current} {
+		f.Close() //nolint:errcheck
+	}
+}
 
 // --- helpers ---
 
 func readString(path string) string {
-	b, err := os.ReadFile(path)
+	s, err := sysfile.ReadString(path)
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(b))
+	return s
 }
 
-func readUint(path string) (uint64, error) {
-	b, err := os.ReadFile(path)
+// openInt holds path open if it exists and currently parses as an
+// integer; nil otherwise.
+func openInt(path string) *sysfile.File {
+	f, err := sysfile.Open(path)
 	if err != nil {
-		return 0, err
+		return nil
 	}
-	return strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	if _, err := f.Int(); err != nil {
+		f.Close() //nolint:errcheck
+		return nil
+	}
+	return f
 }
 
-func readInt(path string) (int64, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0, err
+// heldInt reads a held attribute; false when it is absent or unreadable.
+func heldInt(f *sysfile.File) (int64, bool) {
+	if f == nil {
+		return 0, false
 	}
-	return strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	v, err := f.Int()
+	return v, err == nil
 }

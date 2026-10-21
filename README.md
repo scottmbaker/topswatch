@@ -59,7 +59,7 @@ Per-core metrics carry `core` and `core_type` (`performance`/`efficient`/`low_po
 
 | Metric | Unit | Source |
 |--------|------|--------|
-| Utilization | % | `perf_event_open` engine-active/total ticks (xe) or busy-ns (i915) |
+| Utilization | % | `perf_event_open` engine-active/total ticks (xe) or busy-ns (i915); the events are released while the GPU is idle so it can power down |
 | Per-engine busy (render, compute, copy, video, video enhance) | % | Same, per engine label |
 | Frequency (actual/requested/min/max/rp0/rpe/rpn) | MHz | Xe sysfs `tile*/gt*/freq0/` or i915 `gt_*_freq_mhz` |
 | Media GT frequency (actual/requested) | MHz | Xe sysfs `freq0/` of the GT that holds only video engines (Meteor Lake and later) |
@@ -515,6 +515,7 @@ collector:
   interval: 1s
   history: 300
   process_rescan: 5s   # walk all processes this often; 0 = every interval
+  # cpus: low_power    # confine the daemon to the low-power E-cores
 
 collectors:
   cpu:
@@ -528,19 +529,35 @@ collectors:
 ```
 
 All config values can be overridden via CLI flags (`--address`, `--port`,
-`--interval`, `--process-rescan`).
+`--interval`, `--process-rescan`, `--cpus`).
 
-`process_rescan` is the daemon's main efficiency setting. Finding GPU and
-NPU clients and ranking processes by CPU means walking every process on
-the system, which costs more than reading all the hardware counters
-combined. That walk runs every `process_rescan`; in between, the clients
-already known are still read every `interval`, so per-client GPU usage
-and memory stay current and a client that exits disappears at once. The
-visible effect is that a newly started GPU or NPU process can take up to
-`process_rescan` to appear in the process table, and the top-CPU list
-updates at that cadence. On a Core Ultra 5 335 the idle daemon uses 2.2%
-of a core at `0` and 0.85% at `5s`. Viewer modes (`--tui`, `topswatch-gui`) do not read the
-config file; they take `--connect` and `--refresh` only.
+`process_rescan` is the daemon's main efficiency setting. Ranking
+processes by CPU means reading every process's `stat`, and finding NPU
+clients means scanning every process's open files, which together cost
+more than reading all the hardware counters combined. GPU clients are
+cheaper: the kernel lists them in `/sys/kernel/debug/dri/*/clients`, so
+only those few processes' open files are read. The CPU ranking and the
+GPU client discovery run every `process_rescan`; the open-file scan for
+NPU clients, which yields only a pid and a name, runs every fourth
+rescan. In between, the clients already known are still read every
+`interval`, so per-client GPU usage and memory stay current and a client
+that exits disappears at once. The visible effect is that a newly started
+GPU process can take up to `process_rescan` to appear in the process
+table (an NPU process four times that), and the top-CPU list updates at
+the rescan cadence. On a Core Ultra 5 335 the idle daemon uses 2.2% of a
+core at `0` and 0.85% at `5s`. Viewer modes (`--tui`, `topswatch-gui`) do
+not read the config file; they take `--connect` and `--refresh` only.
+
+`cpus` confines the daemon's threads to a set of CPUs: a core type
+(`low_power`, `efficient`, `performance`, as the kernel classifies the
+machine's cores) or a list such as `12-15`. The daemon then also runs
+that many scheduler threads instead of one per CPU. It keeps the
+daemon's once-a-second wake-ups off the cores the watched workload runs
+on. It is not a power saving: measured on a Panther Lake laptop, pinning
+to the low-power cores changed neither package power nor the P-cores'
+idle residency, because the daemon's CPU work is too small to register.
+What the daemon does cost at idle is about 1.2 W of package power for
+keeping the GPU's engine counters alive; see [VIEWERS.md](VIEWERS.md).
 
 ## Supported Platforms
 

@@ -36,10 +36,19 @@ type engineCounter struct {
 	prevValid bool
 }
 
+// engineSpec is what it takes to open one engine's counters again.
+type engineSpec struct {
+	label  string
+	actCfg uint64
+	totCfg uint64 // unused on i915
+}
+
 type perfReader struct {
 	driver   string // "xe" or "i915"
 	cpu      int
-	counters []*engineCounter
+	pmuType  uint32
+	specs    []engineSpec     // every engine found at discovery
+	counters []*engineCounter // nil while the events are released
 }
 
 // --- Entry point ---
@@ -70,7 +79,7 @@ func discoverPerfReader(driver, pciSlot string) (*perfReader, error) {
 		return nil, fmt.Errorf("read PMU format dir: %w", err)
 	}
 
-	r := &perfReader{driver: driver, cpu: cpu}
+	r := &perfReader{driver: driver, cpu: cpu, pmuType: pmuType}
 
 	if driver == "xe" {
 		if err := r.initXe(pmuDir, pmuType, format); err != nil {
@@ -88,6 +97,61 @@ func discoverPerfReader(driver, pciSlot string) (*perfReader, error) {
 		return nil, fmt.Errorf("no usable engine counters under %s", pmuDir)
 	}
 	return r, nil
+}
+
+// labels names every engine found at discovery, open or not.
+func (r *perfReader) labels() []string {
+	out := make([]string, 0, len(r.specs))
+	for _, sp := range r.specs {
+		out = append(out, sp.label)
+	}
+	return out
+}
+
+// isOpen reports whether the events are currently held.
+func (r *perfReader) isOpen() bool { return len(r.counters) > 0 }
+
+// open re-creates the events from the discovery-time specs and primes
+// their baselines, so the next sample has deltas.
+func (r *perfReader) open() error {
+	if r.isOpen() {
+		return nil
+	}
+	attrSize := uint32(unsafe.Sizeof(unix.PerfEventAttr{}))
+	for _, sp := range r.specs {
+		actAttr := unix.PerfEventAttr{Type: r.pmuType, Size: attrSize, Config: sp.actCfg}
+		actFd, err := unix.PerfEventOpen(&actAttr, -1, r.cpu, -1, unix.PERF_FLAG_FD_CLOEXEC)
+		if err != nil {
+			r.close()
+			return fmt.Errorf("%s: %w", sp.label, err)
+		}
+		totFd := -1
+		if r.driver == "xe" {
+			totAttr := unix.PerfEventAttr{Type: r.pmuType, Size: attrSize, Config: sp.totCfg}
+			totFd, err = unix.PerfEventOpen(&totAttr, -1, r.cpu, -1, unix.PERF_FLAG_FD_CLOEXEC)
+			if err != nil {
+				_ = unix.Close(actFd)
+				r.close()
+				return fmt.Errorf("%s: %w", sp.label, err)
+			}
+		}
+		r.counters = append(r.counters, &engineCounter{label: sp.label, activeFd: actFd, totalFd: totFd})
+	}
+	_ = r.readEngineBusy()
+	return nil
+}
+
+// close releases the events; the GT may then power down.
+func (r *perfReader) close() {
+	for _, ec := range r.counters {
+		if ec.activeFd > 0 {
+			_ = unix.Close(ec.activeFd)
+		}
+		if ec.totalFd > 0 {
+			_ = unix.Close(ec.totalFd)
+		}
+	}
+	r.counters = nil
 }
 
 // --- Format / event-file parsing (shared) ---
@@ -276,8 +340,10 @@ func (r *perfReader) initXe(pmuDir string, pmuType uint32, format pmuFormat) err
 				_ = unix.Close(actFd)
 				continue
 			}
+			label := fmt.Sprintf("%s%d", sl.class, inst)
+			r.specs = append(r.specs, engineSpec{label: label, actCfg: actCfg, totCfg: totCfg})
 			r.counters = append(r.counters, &engineCounter{
-				label:    fmt.Sprintf("%s%d", sl.class, inst),
+				label:    label,
 				activeFd: actFd,
 				totalFd:  totFd,
 			})
@@ -318,8 +384,10 @@ func (r *perfReader) initI915(pmuDir string, pmuType uint32, format pmuFormat) e
 		if err != nil {
 			continue
 		}
+		label := strings.TrimSuffix(name, "-busy")
+		r.specs = append(r.specs, engineSpec{label: label, actCfg: cfg})
 		r.counters = append(r.counters, &engineCounter{
-			label:    strings.TrimSuffix(name, "-busy"),
+			label:    label,
 			activeFd: fd,
 			totalFd:  -1,
 		})
@@ -443,15 +511,6 @@ func (r *perfReader) Close() {
 	if r == nil {
 		return
 	}
-	for _, ec := range r.counters {
-		if ec.activeFd > 0 {
-			_ = unix.Close(ec.activeFd)
-			ec.activeFd = 0
-		}
-		if ec.totalFd > 0 {
-			_ = unix.Close(ec.totalFd)
-			ec.totalFd = 0
-		}
-	}
-	r.counters = nil
+	r.close()
+	r.specs = nil
 }

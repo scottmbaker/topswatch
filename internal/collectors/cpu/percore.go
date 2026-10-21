@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/scottmbaker/topswatch/internal/sysfile"
 )
 
 // Core type labels — match the kernel's hybrid scheduler terminology.
@@ -55,7 +57,7 @@ func discoverTopology() ([]coreInfo, error) {
 	maxFreqs := map[int]uint64{}
 	for _, id := range visible {
 		path := fmt.Sprintf("/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", id)
-		if v, err := readUint(path); err == nil {
+		if v, err := sysfile.ReadUint(path); err == nil {
 			maxFreqs[id] = v
 		}
 	}
@@ -177,64 +179,18 @@ func intSet(xs []int) map[int]bool {
 	return out
 }
 
-// --- Per-core /proc/stat reader ---
-
-type perCoreStat struct {
-	total uint64
-	idle  uint64
-}
-
-// readPerCoreStats reads every "cpuN" line from /proc/stat into a map
-// keyed by logical CPU id.
-func readPerCoreStats() (map[int]perCoreStat, error) {
-	f, err := os.Open("/proc/stat")
+// CPUsByType returns the logical CPUs of each core type (the CoreType*
+// constants) as the kernel exposes them, for callers that want to place
+// work on a particular kind of core. On a non-hybrid part every CPU is
+// "performance".
+func CPUsByType() (map[string][]int, error) {
+	cores, err := discoverTopology()
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close() //nolint:errcheck
-
-	out := map[int]perCoreStat{}
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "cpu") || strings.HasPrefix(line, "cpu ") {
-			continue
-		}
-		// Find end of "cpuN"
-		end := 3
-		for end < len(line) && line[end] >= '0' && line[end] <= '9' {
-			end++
-		}
-		if end == 3 {
-			continue
-		}
-		id, err := strconv.Atoi(line[3:end])
-		if err != nil {
-			continue
-		}
-		fields := strings.Fields(line[end:])
-		var total, idle uint64
-		for i, fs := range fields {
-			v, err := strconv.ParseUint(fs, 10, 64)
-			if err != nil {
-				continue
-			}
-			total += v
-			if i == 3 || i == 4 { // idle + iowait
-				idle += v
-			}
-		}
-		out[id] = perCoreStat{total: total, idle: idle}
+	out := map[string][]int{}
+	for _, c := range cores {
+		out[c.coreType] = append(out[c.coreType], c.id)
 	}
-	return out, scanner.Err()
-}
-
-// readPerCoreFreqMHz reads scaling_cur_freq for one logical CPU.
-func readPerCoreFreqMHz(id int) (float64, bool) {
-	path := fmt.Sprintf("/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", id)
-	v, err := readUint(path)
-	if err != nil {
-		return 0, false
-	}
-	return float64(v) / 1000.0, true
+	return out, nil
 }

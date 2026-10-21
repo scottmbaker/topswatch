@@ -14,9 +14,12 @@
 //     We still surface the PID/comm so users can see which processes
 //     hold the NPU open, just without per-process busy attribution.
 //
-// Discovery is via /proc/<pid>/fd symlinks, so the package needs to run
-// with sufficient privileges to read other processes' fds (typically
-// CAP_SYS_PTRACE or root).
+// GPU clients are found from the DRM core's per-device client list in
+// debugfs (see drmclients.go) and only those processes' fd tables are
+// read. Without that list, and for the NPU, which has no such list,
+// discovery is via every process's /proc/<pid>/fd symlinks, so the
+// package needs to run with sufficient privileges to read other
+// processes' fds (typically CAP_SYS_PTRACE or root).
 package procwalk
 
 import (
@@ -28,6 +31,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/scottmbaker/topswatch/internal/sysfile"
 )
 
 // Snapshot is one polling result. It is fully self-contained — the caller
@@ -109,16 +114,30 @@ type Tracker struct {
 	// keyed by pid for CPU jiffie deltas.
 	cpuState map[int]*cpuPidState
 
-	// rescanEvery is how often the whole process table is walked: every
-	// process's open files are scanned for GPU/NPU handles and its CPU time
-	// is read for the top-CPU list. Zero walks on every sample. Between
-	// walks only the handles found last time are re-read, which is far
-	// cheaper; the cost is that a newly started client shows up to
-	// rescanEvery late and the top-CPU list updates at that cadence. Client
-	// exits, per-client GPU usage and memory are still fresh every sample.
+	// rescanEvery is how often the process table is walked: the DRM
+	// client list is read and those processes' open files scanned for GPU
+	// handles, and every process's CPU time is read for the top-CPU list.
+	// Zero walks on every sample. Between walks only the handles found
+	// last time are re-read, which is far cheaper; the cost is that a
+	// newly started client shows up to rescanEvery late and the top-CPU
+	// list updates at that cadence. Client exits, per-client GPU usage and
+	// memory are still fresh every sample.
+	//
+	// NPU holders have no kernel list, so finding them means scanning
+	// every process's open files, the most expensive thing a sample does.
+	// Nothing but a pid and a name comes of it, so that scan runs every
+	// npuRescanFactor-th rescan. Where the DRM list is unreadable (no
+	// debugfs, not root) the same full scan finds the GPU handles too and
+	// runs at the rescan cadence, as before the list was used.
 	rescanEvery time.Duration
 	lastScan    time.Time
-	known       []accelFD
+	lastNPUScan time.Time
+	knownGPU    []accelFD
+	knownNPU    []accelFD
+	// drmRoot is the debugfs directory holding the DRM client lists.
+	drmRoot string
+	// accelDir is the device directory whose presence says an NPU exists.
+	accelDir string
 	// lastCPU is the top-CPU process list from the most recent full scan.
 	// It is refreshed on the same cadence: reading every process's stat is
 	// as costly as the open-file scan, and a busiest-processes list
@@ -132,6 +151,24 @@ type accelFD struct {
 	fd   string
 	npu  bool
 	comm string
+	// info is the handle's fdinfo, held open between scans for GPU
+	// clients and re-read in place every sample.
+	info *sysfile.File
+}
+
+// npuRescanFactor is how many rescans pass between full open-file scans
+// for NPU holders.
+const npuRescanFactor = 4
+
+// scanDue reports whether a rescan should run at now.
+func (t *Tracker) scanDue(now time.Time) bool {
+	return t.rescanEvery <= 0 || t.lastScan.IsZero() || now.Sub(t.lastScan) >= t.rescanEvery
+}
+
+// npuScanDue reports whether the full open-file scan for NPU holders
+// should run at now.
+func (t *Tracker) npuScanDue(now time.Time) bool {
+	return t.rescanEvery <= 0 || t.lastNPUScan.IsZero() || now.Sub(t.lastNPUScan) >= npuRescanFactor*t.rescanEvery
 }
 
 // SetRescanInterval sets how often the full open-file scan runs. Zero (the
@@ -142,20 +179,17 @@ func (t *Tracker) SetRescanInterval(d time.Duration) {
 	t.mu.Unlock()
 }
 
-// scanDue reports whether a full scan should run at now.
-func (t *Tracker) scanDue(now time.Time) bool {
-	return t.rescanEvery <= 0 || t.lastScan.IsZero() || now.Sub(t.lastScan) >= t.rescanEvery
-}
-
 const (
 	driPrefix   = "/dev/dri/"
 	accelPrefix = "/dev/accel/"
 )
 
-// scanAccelFDs walks every process's fd table and returns the handles
-// onto GPU and NPU device nodes. This is the expensive part of a sample:
-// one directory read per process and one readlink per open file.
-func scanAccelFDs(pids []int) []accelFD {
+// scanAccelFDs walks the given processes' fd tables and returns the
+// handles onto GPU and NPU device nodes. Over the whole process table
+// this is the expensive part of a sample: one directory read per process
+// and one readlink per open file. wantGPU and wantNPU select which
+// device family's handles are returned.
+func scanAccelFDs(pids []int, wantGPU, wantNPU bool) []accelFD {
 	var out []accelFD
 	for _, pid := range pids {
 		fdDir := "/proc/" + strconv.Itoa(pid) + "/fd"
@@ -179,9 +213,9 @@ func scanAccelFDs(pids []int) []accelFD {
 				continue
 			}
 			switch {
-			case strings.HasPrefix(tgt, driPrefix):
+			case wantGPU && strings.HasPrefix(tgt, driPrefix):
 				out = append(out, accelFD{pid: pid, fd: fdNum, comm: name()})
-			case strings.HasPrefix(tgt, accelPrefix):
+			case wantNPU && strings.HasPrefix(tgt, accelPrefix):
 				out = append(out, accelFD{pid: pid, fd: fdNum, npu: true, comm: name()})
 			}
 		}
@@ -189,31 +223,35 @@ func scanAccelFDs(pids []int) []accelFD {
 	return out
 }
 
-// onePerClient keeps a single handle per DRM client. A process that
-// dup(2)s its device fd (Mesa opens several per GL context) has one fdinfo
-// per fd, all describing the same client, and reading fdinfo is one of the
-// costlier things a sample does. Choosing the handle once per scan means
-// the samples in between read each client exactly once. Handles whose
-// driver publishes no client id are all kept, as before.
+// onePerClient keeps a single handle per DRM client and holds its fdinfo
+// open. A process that dup(2)s its device fd (Mesa opens several per GL
+// context) has one fdinfo per fd, all describing the same client, and
+// reading fdinfo is one of the costlier things a sample does. Choosing
+// the handle once per scan means the samples in between read each client
+// exactly once, in place. Handles whose driver publishes no client id
+// are all kept, as before.
 func onePerClient(fds []accelFD) []accelFD {
 	seen := map[string]bool{}
 	out := fds[:0:0]
 	for _, k := range fds {
-		if k.npu {
-			out = append(out, k)
+		f, err := sysfile.Open(fmt.Sprintf("/proc/%d/fdinfo/%s", k.pid, k.fd))
+		if err != nil {
 			continue
 		}
-		info := readFdInfo(k.pid, k.fd)
+		info := parseFdInfo(f)
 		if _, ok := info["drm-driver"]; !ok {
-			continue // not a DRM client handle
+			f.Close() //nolint:errcheck
+			continue  // not a DRM client handle
 		}
 		if id := info["drm-client-id"]; id != "" {
 			ck := info["drm-driver"] + ":" + id
 			if seen[ck] {
+				f.Close() //nolint:errcheck
 				continue
 			}
 			seen[ck] = true
 		}
+		k.info = f
 		out = append(out, k)
 	}
 	return out
@@ -226,20 +264,83 @@ func revalidate(known []accelFD) []accelFD {
 	out := known[:0:0]
 	for _, k := range known {
 		tgt, err := os.Readlink("/proc/" + strconv.Itoa(k.pid) + "/fd/" + k.fd)
-		if err != nil {
+		if err == nil && (k.npu && strings.HasPrefix(tgt, accelPrefix) || !k.npu && strings.HasPrefix(tgt, driPrefix)) {
+			out = append(out, k)
 			continue
 		}
-		if k.npu && strings.HasPrefix(tgt, accelPrefix) || !k.npu && strings.HasPrefix(tgt, driPrefix) {
-			out = append(out, k)
-		}
+		k.info.Close() //nolint:errcheck
 	}
 	return out
+}
+
+func closeAll(fds []accelFD) {
+	for _, k := range fds {
+		k.info.Close() //nolint:errcheck
+	}
 }
 
 func NewTracker() *Tracker {
 	return &Tracker{
 		gpuState: map[string]*fdState{},
 		cpuState: map[int]*cpuPidState{},
+		drmRoot:  drmDebugfs,
+		accelDir: "/dev/accel",
+	}
+}
+
+// Close releases the fdinfo handles held for known clients.
+func (t *Tracker) Close() {
+	t.mu.Lock()
+	closeAll(t.knownGPU)
+	closeAll(t.knownNPU)
+	t.knownGPU, t.knownNPU = nil, nil
+	t.mu.Unlock()
+}
+
+// hasNPU reports whether an NPU device node exists, so the full
+// open-file scan only runs where it can find something.
+func (t *Tracker) hasNPU() bool {
+	entries, err := os.ReadDir(t.accelDir)
+	return err == nil && len(entries) > 0
+}
+
+// discover refreshes the known GPU and NPU handles on a rescan. GPU
+// clients come from the DRM list where it is readable; otherwise, and
+// for the NPU on its slower cadence, from a walk of every process.
+func (t *Tracker) discover(now time.Time, pids []int) {
+	gpuPIDs, haveList := drmClientPIDs(t.drmRoot)
+	npuDue := t.npuScanDue(now) && t.hasNPU()
+
+	closeAll(t.knownGPU)
+	switch {
+	case haveList:
+		// Only the processes the kernel says hold a GPU are scanned.
+		list := make([]int, 0, len(gpuPIDs))
+		for pid := range gpuPIDs {
+			list = append(list, pid)
+		}
+		sort.Ints(list)
+		t.knownGPU = onePerClient(scanAccelFDs(list, true, false))
+		if npuDue {
+			t.knownNPU = scanAccelFDs(pids, false, true)
+			t.lastNPUScan = now
+		}
+	case npuDue:
+		// One full walk serves both families.
+		all := scanAccelFDs(pids, true, true)
+		var gpu []accelFD
+		t.knownNPU = t.knownNPU[:0]
+		for _, k := range all {
+			if k.npu {
+				t.knownNPU = append(t.knownNPU, k)
+			} else {
+				gpu = append(gpu, k)
+			}
+		}
+		t.knownGPU = onePerClient(gpu)
+		t.lastNPUScan = now
+	default:
+		t.knownGPU = onePerClient(scanAccelFDs(pids, true, false))
 	}
 }
 
@@ -284,23 +385,25 @@ func (t *Tracker) Sample() Snapshot {
 	// accel fds, but the user just wants to see the PID once).
 	npuPids := map[int]string{}
 
-	// Find the GPU/NPU handles: a full scan when one is due, otherwise
+	// Find the GPU/NPU handles: discovery when a rescan is due, otherwise
 	// just re-check the ones found last time.
 	if scan {
-		t.known = onePerClient(scanAccelFDs(pids))
+		t.discover(now, pids)
 		t.lastScan = now
 	} else {
-		t.known = revalidate(t.known)
+		t.knownGPU = revalidate(t.knownGPU)
 	}
+	// NPU handles are revalidated every sample either way: discovery runs
+	// rarely for them, but an exit should still show promptly.
+	t.knownNPU = revalidate(t.knownNPU)
 
-	for _, k := range t.known {
-		if k.npu {
-			if _, dup := npuPids[k.pid]; !dup {
-				npuPids[k.pid] = k.comm
-			}
-			continue
+	for _, k := range t.knownNPU {
+		if _, dup := npuPids[k.pid]; !dup {
+			npuPids[k.pid] = k.comm
 		}
-		info := readFdInfo(k.pid, k.fd)
+	}
+	for _, k := range t.knownGPU {
+		info := parseFdInfo(k.info)
 		if len(info) == 0 {
 			continue
 		}
@@ -454,6 +557,10 @@ func listPids() ([]int, error) {
 	return pids, nil
 }
 
+// procBuf bounds the one-shot reads of per-process files; comm and
+// cmdline are short and stat is a few hundred bytes.
+const procBuf = 4096
+
 // readProcessName returns a display-friendly name for a process. It prefers
 // /proc/<pid>/cmdline (which has the actual binary path and script args)
 // over /proc/<pid>/comm (which is the kernel's 16-char-truncated thread name).
@@ -469,7 +576,7 @@ func readProcessName(pid int) string {
 }
 
 func readComm(pid int) string {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	b, err := sysfile.ReadInto(fmt.Sprintf("/proc/%d/comm", pid), make([]byte, procBuf))
 	if err != nil {
 		return ""
 	}
@@ -481,7 +588,7 @@ func readComm(pid int) string {
 // spaces, truncate to 40 chars. So "/usr/bin/python3 -u /app/imagegen.py"
 // becomes "python3 imagegen.py".
 func readCmdline(pid int) string {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	b, err := sysfile.ReadInto(fmt.Sprintf("/proc/%d/cmdline", pid), make([]byte, procBuf))
 	if err != nil || len(b) == 0 {
 		return ""
 	}
@@ -511,11 +618,15 @@ func readCmdline(pid int) string {
 	return out
 }
 
-// readFdInfo parses /proc/<pid>/fdinfo/<fd> as a "key:\tvalue" map.
-// Values keep any trailing unit suffix (e.g. "5970176 KiB"); callers
-// decide how to interpret them via parseUintField / firstUint.
-func readFdInfo(pid int, fd string) map[string]string {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/fdinfo/%s", pid, fd))
+// parseFdInfo re-reads a held /proc/<pid>/fdinfo/<fd> and parses it as
+// a "key:\tvalue" map. Values keep any trailing unit suffix (e.g.
+// "5970176 KiB"); callers decide how to interpret them via
+// parseUintField / firstUint.
+func parseFdInfo(f *sysfile.File) map[string]string {
+	if f == nil {
+		return nil
+	}
+	b, err := f.Bytes()
 	if err != nil {
 		return nil
 	}

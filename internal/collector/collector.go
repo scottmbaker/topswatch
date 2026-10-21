@@ -130,9 +130,13 @@ func (c *Collector) Start() {
 	go c.loop()
 }
 
-// Stop halts the collection loop.
+// Stop halts the collection loop and releases what the process walk
+// holds open.
 func (c *Collector) Stop() {
 	close(c.stopCh)
+	if c.procs != nil {
+		c.procs.Close()
+	}
 }
 
 func (c *Collector) loop() {

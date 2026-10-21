@@ -38,6 +38,12 @@ type Module struct {
 
 	// perf reader for engine-busy utilization (may be nil)
 	perf *perfReader
+	// Engine events are held only while the GPU works (see gate.go);
+	// idle is the GT's C6 residency, nil where the driver has none, in
+	// which case the events stay open as they always did.
+	idle       *gtIdle
+	gate       *engineGate
+	gateLogged bool
 }
 
 func New() *Module {
@@ -94,7 +100,7 @@ func (m *Module) Init() error {
 		log.Printf("[gpu] RAPL uncore unavailable: %v (power metric disabled)", err)
 	} else {
 		m.rapl = r
-		log.Printf("[gpu] RAPL uncore at %s", r.energyPath)
+		log.Printf("[gpu] RAPL uncore at %s", r.energy.Path())
 	}
 	if m.rapl == nil {
 		if d, err := socpmt.Open(); err == nil {
@@ -115,6 +121,13 @@ func (m *Module) Init() error {
 		log.Printf("[gpu] perf engine-busy: %d engines (%s)", len(perf.counters), strings.Join(labels, ","))
 		// Prime baselines
 		_ = m.perf.readEngineBusy()
+		if m.idle = discoverGTIdle(card.deviceDir); m.idle != nil {
+			m.gate = newEngineGate()
+			m.idle.activeFraction(time.Now())
+			log.Printf("[gpu] engine counters released while the GPU is idle (%d GT idle counters)", len(m.idle.gts))
+		} else {
+			log.Printf("[gpu] no GT idle residency in sysfs; engine counters stay open")
+		}
 	}
 
 	log.Printf("[gpu] initialized: %s, driver=%s, card=%s",
@@ -176,7 +189,7 @@ func (m *Module) Collect() ([]module.Metric, error) {
 
 	// --- engine-busy utilization ---
 	if m.perf != nil {
-		busy := m.perf.readEngineBusy()
+		busy := m.collectEngineBusy()
 		var total float64
 		for label, frac := range busy {
 			metrics = append(metrics, module.Metric{
@@ -196,6 +209,41 @@ func (m *Module) Collect() ([]module.Metric, error) {
 	}
 
 	return metrics, nil
+}
+
+// collectEngineBusy reads the engine events, or reports every engine
+// idle while they are released, and moves the gate.
+func (m *Module) collectEngineBusy() map[string]float64 {
+	if m.gate == nil {
+		return m.perf.readEngineBusy()
+	}
+	now := time.Now()
+	active := m.idle.activeFraction(now)
+	open := m.perf.isOpen()
+	var busy map[string]float64
+	if open {
+		busy = m.perf.readEngineBusy()
+	}
+	switch want := m.gate.next(open, busy, active); {
+	case open && !want:
+		m.perf.close()
+		if !m.gateLogged {
+			log.Printf("[gpu] idle: engine counters released; they reopen when the GT becomes active")
+			m.gateLogged = true
+		}
+		busy = nil
+	case !open && want:
+		if err := m.perf.open(); err != nil {
+			log.Printf("[gpu] cannot reopen engine counters: %v", err)
+		}
+	}
+	if busy == nil {
+		busy = map[string]float64{}
+		for _, l := range m.perf.labels() {
+			busy[l] = 0
+		}
+	}
+	return busy
 }
 
 func (m *Module) collectFreq() []module.Metric {
@@ -311,6 +359,15 @@ func (m *Module) collectHwmonTemp() []module.Metric {
 func (m *Module) Close() error {
 	if m.perf != nil {
 		m.perf.Close()
+	}
+	m.xeFreq.close()
+	m.mediaFreq.close()
+	m.i915Freq.close()
+	m.hwmon.close()
+	m.rapl.close()
+	m.idle.close()
+	if m.gtPMT != nil {
+		m.gtPMT.Close()
 	}
 	return nil
 }

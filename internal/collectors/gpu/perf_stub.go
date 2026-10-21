@@ -18,4 +18,14 @@ func discoverPerfReader(driver, pciSlot string) (*perfReader, error) {
 
 func (r *perfReader) readEngineBusy() map[string]float64 { return nil }
 
+func (r *perfReader) labels() []string { return nil }
+
+func (r *perfReader) isOpen() bool { return false }
+
+func (r *perfReader) open() error {
+	return fmt.Errorf("perf_event_open not supported on this platform")
+}
+
+func (r *perfReader) close() {}
+
 func (r *perfReader) Close() {}

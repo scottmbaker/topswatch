@@ -547,8 +547,199 @@ sparkline and the chart. Why `vecs` runs busier than `vcs` under a
 decode-only load was not investigated; the demo's own baseline shows
 the same ratio.
 
+## Where the daemon's time goes (2026-10-21)
+
+Measured on the Dell XPS (Core Ultra X7 358H, 16 threads: P-cores 0-3,
+E-cores 4-11, low-power E-cores 12-15; kernel 6.18; ~490 processes; GNOME
+desktop idle; the demo kit's own daemon container running throughout).
+`perf stat` over 30 s windows; "daemon CPU" is user+sys as a share of one
+core.
+
+### What the collectors read
+
+Nearly everything is a plain read of a procfs or sysfs text attribute.
+The exceptions are the GPU engine counters, read through `perf_event_open`
+fds, and the PMT telemetry regions, binary sysfs files. There is no ioctl,
+mmap, netlink or BPF anywhere.
+
+### Before: syscall churn
+
+| Configuration | Daemon CPU | user / sys (s per 30 s) |
+|---|---|---|
+| 1 s interval, 5 s rescan (default) | 1.4% | 0.13 / 0.31 |
+| rescan every sample | 2.6% | 0.20 / 0.67 |
+| rescan off after the first | 0.8% | 0.06 / 0.20 |
+| 5 s interval | 0.6% | 0.04 / 0.15 |
+
+In 10 s the daemon issued about 3,400 `openat` and 6,600 `readlinkat`.
+The process walk accounted for 2,000 of the opens and every readlink; the
+per-second path for 480 opens of cpufreq attributes alone, since Go's
+`os.ReadFile` costs seven syscalls per value (open, fcntl, a failed
+epoll_ctl, fstat, two reads, close) and the average frequency ran a
+`filepath.Glob` every sample on top.
+
+### Done: attributes held open, GPU clients from the kernel's list
+
+- **`internal/sysfile`.** Every attribute sampled each tick is opened
+  once at init and re-read with `pread` at offset 0, which the kernel
+  treats as a fresh read of the attribute: one syscall per value. Micro-
+  benchmark on the same box, per read: cpufreq 6.4 µs → 0.4 µs, RAPL
+  10.5 → 3.2, `/proc/stat` 25 → 9, `/proc/meminfo` 6.5 → 1.3. The PMT
+  region stays at ~110 µs either way: that is MMIO latency, not the
+  syscall. `/proc/stat` is now read once per sample for the aggregate and
+  the per-core lines; each `scaling_cur_freq` once for the average and
+  the per-core value; the known DRM clients' `fdinfo` are held open too.
+- **DRM client list.** `/sys/kernel/debug/dri/<minor>/clients` names the
+  processes holding each GPU open, so only those processes' fd tables are
+  scanned. The NPU driver publishes no such list (its debugfs directory is
+  the driver's own), so NPU holders are still found by scanning every
+  process's open files; as that yields only a pid and a name, it runs
+  every fourth rescan (20 s by default). Where the DRM list is unreadable
+  (no debugfs, not root) the full scan finds both, at the rescan cadence,
+  as before.
+- **One-shot reads of per-process files** (`stat`, `comm`, `cmdline`) go
+  through open/pread/close into a reused buffer: three syscalls, not seven.
+
+Syscalls per 10 s at the default configuration: 14,400 → 3,300 (`openat`
+3,358 → 784, `readlinkat` 6,604 → 300). What remains is the top-CPU walk
+(716 `stat` reads per 10 s) and the sampling itself (one `pread` per
+value, ~125 per second).
+
+| Configuration (after) | Daemon CPU | user / sys (s per 30 s) |
+|---|---|---|
+| 1 s interval, 5 s rescan (default) | 1.5% | 0.11 / 0.37 |
+| rescan every sample | 2.9% | 0.18 / 0.71 |
+| 5 s interval | 0.5% | 0.02 / 0.12 |
+| default, `--cpus low_power` | 1.5% | 0.12 / 0.35 |
+
+The syscall count fell four-fold and the daemon's CPU did not move
+(run-to-run spread on this box is about ±0.1 points). A `perf record` of
+the daemon says why: three quarters of its samples are inside
+`pread`, and within that almost all under `sysfs_kf_seq_show`, the
+attributes' own show functions. The top symbols are the ACPI interpreter
+(`acpi_ns_search_one_scope` and friends, 15%: the battery attributes
+evaluate an ACPI method that talks to the embedded controller),
+`delay_halt_tpause` (waiting on that controller), `memcpy_fromio` (PMT),
+`xe_mmio_read32` (GT frequency) and the IPI for the RAPL MSR read. The
+VFS path around them was never the cost; the kernel work the hardware
+questions require is. That is also why neither `libpfc` (a kernel module
+plus library for reading core PMCs with `rdpmc` from the measuring
+thread; none of these metrics are core PMCs) nor eBPF (tracepoints put
+the cost inline on the watched workload's context switches; a BPF task
+iterator would only replace the walk that the DRM list already replaces)
+would lower it.
+
+What does lower it is asking fewer questions: the 5 s interval row, and
+the fact that the walk now scales with the number of GPU clients rather
+than the number of processes.
+
+### Pinning the daemon to the low-power cores
+
+`collector.cpus` / `--cpus` confines every thread to a set of CPUs and
+sets GOMAXPROCS to match (16 threads → 6 on this box). The question was
+whether that lowers the machine's power: a monitor waking every second
+on whichever core is handy keeps a performance core and its cache out of
+deep idle.
+
+Twelve interleaved 60 s windows on the Dell XPS, screen off, GNOME idle,
+the demo kit's own daemon container running throughout. "deep" is the
+share of time in C6S or C10 summed over the cores of that type; "wake" is
+cpuidle exits per second over those cores; "GPU asleep" is the xe
+device's runtime-suspended share.
+
+| Daemon | pkg W | core W | psys W | P deep / wake | E deep / wake | LP deep / wake | GPU asleep | daemon CPU |
+|---|---|---|---|---|---|---|---|---|
+| off | 0.28 | 0.02 | 0.31 | 99.8% / 67 | 99.8% / 99 | 99.8% / 24 | 73% | |
+| on, unpinned | 1.51 | 0.03 | 4.54 | 99.5% / 105 | 99.6% / 130 | 99.7% / 84 | 0% | 1.4% |
+| on, `--cpus low_power` | 1.49 | 0.02 | 4.52 | 99.7% / 100 | 99.6% / 96 | 99.2% / 116 | 0% | 1.5% |
+
+(Means of four windows each; the spread within a mode is under 0.03 W
+on the package and under 0.05 W on psys.)
+
+**Pinning changes nothing worth having.** The daemon's CPU work is so
+small that the core domain stays at 0.02 W with or without it, every
+core type stays over 99% in deep idle either way, and the wake-ups the
+pin moves to the low-power cores are partly offset by ones that stay on
+cpu0 anyway: the RAPL MSR read goes there by IPI, and the timers of the
+kernel's own housekeeping do too. The option is kept because it is
+cheap and may matter for latency-sensitive work on the P-cores, but it
+is not a power saving and the default leaves it unset.
+
+**What the daemon does cost is the GPU.** Running it takes the package
+from 0.28 W to 1.5 W and the platform (psys) from 0.3 W to 4.5 W on an
+otherwise idle laptop, and the column that moves with it is GPU runtime
+suspend: 73% asleep without the daemon, never asleep with it. Isolating
+the reads, 40 s windows:
+
+| Alone on the idle box | GPU asleep | pkg W |
+|---|---|---|
+| nothing | 72% | 0.28 |
+| daemon with the gpu collector disabled (fdinfo reads only) | 0% | 0.28 |
+| `cat act_freq` once a second | 0% | 0.29 |
+| `cat` one client's fdinfo once a second | 0% | 0.30 |
+| one `perf_event_open` fd on an xe engine counter, held open | 0% | 1.43 |
+| one `perf_event_open` fd on xe `gt-c6-residency`, held open | 0% | 0.27 |
+
+Every one of these keeps the device out of runtime suspend (xe takes a
+runtime-PM reference for each sysfs or fdinfo read, with a 1 s
+autosuspend delay, and for the life of a PMU event). Only the engine
+events cost power: their counters are engine-activity statistics kept by
+the GuC, and while any such event is open the GT stays out of its C6
+state to maintain them, about 1.15 W on the package and over 4 W at the
+platform. A C6-residency event on the same PMU is free. The NPU stayed
+100% runtime-suspended in every window; its sysfs and PMT reads do not
+wake it.
+
+So the single largest impact this watcher has on the watched device was
+holding its five engine-busy perf fds open while nothing was using the
+GPU.
+
+**Done: engine events released while the GPU is idle** (`gate.go`,
+`gtidle.go` in the gpu collector). After five consecutive samples in
+which every engine reads 0% busy the events are closed and every engine
+reports 0% busy. While they are closed each sample reads the GTs'
+`gtidle/idle_residency_ms` (xe; free, measured above); a GT that spent
+more than 5% of the interval out of C6 reopens them, with the baseline
+read at once so the next sample has a full-interval delta. Without that
+attribute (i915) nothing changes. Checked on the Dell XPS with a VAAPI
+encode started against the released counters:
+
+| Time | perf fds | GPU busy reported |
+|---|---|---|
+| daemon start | 10 | 0% |
+| 10 s later (idle) | 0 | 0% |
+| encode +1 s | 0 | 0% |
+| encode +2 s | 10 | 100% (vcs0 97.5%) |
+| encode +3 s | 10 | 100% (vcs0 89.8%) |
+| encode +4 s (finishing) | 10 | 15% |
+| encode +5 s to +8 s (done) | 10 | 0% |
+| five idle samples later | 0 | 0% |
+
+Idle power with the gate, same box and conditions as the table above,
+three interleaved 60 s windows each:
+
+| Daemon | pkg W | psys W | GPU asleep | daemon CPU |
+|---|---|---|---|---|
+| off | 0.28 | 0.29 | 58-76% | |
+| on, engine events gated | 0.28 | 0.38 | 0% | 1.1% |
+| on, before the gate (from above) | 1.51 | 4.54 | 0% | 1.4% |
+
+The package cost of the idle daemon is now below what the windows can
+resolve, the platform cost about 0.1 W. The GPU still never reaches
+runtime suspend while the daemon runs (the frequency and fdinfo reads
+each take a runtime-PM reference), but that state was measured to cost
+nothing on this board. The daemon's own CPU fell too, since reading ten
+perf fds a second was part of its kernel time.
+
 ## Not done / follow-ups
 
+- The engine-event gate is xe-only. i915 exposes `gt/gt0/rc6_residency_ms`
+  and could use the same gate if holding its PMU events open turns out to
+  cost power there; not measured.
+- The battery attributes cost an ACPI method evaluation through the
+  embedded controller each second; sampling the fuel gauge less often
+  than the SoC counters would remove most of the daemon's remaining
+  kernel time.
 - Per-core panels and the process table are web-only for now; the TUI
   shows headline metrics and, expanded, the GPU engines.
 - The GUI is deliberately minimal (image viewer). A native Fyne layout

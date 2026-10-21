@@ -110,6 +110,7 @@ In the paths below, `<card>` is the discovered DRM card (e.g. `card0`) and
   - Aggregate utilization = Σ per-engine fractions, clamped to 100%.
 - **Unit:** %
 - **Description:** Aggregate GPU busy fraction across all engines. Uses the same kernel PMU that `intel_gpu_top` reads, accessed via raw `perf_event_open(2)` (no CGO). Typically requires `CAP_PERFMON` or root unless `perf_event_paranoid` is set permissively.
+- **Idle gating (xe):** while any engine event is open the GuC keeps the GT out of its C6 state to maintain the counters, about 1.15 W of package power on an idle Panther Lake laptop. So the events are released after five consecutive samples in which every engine was idle, and every engine then reports 0% busy, which is what it is. They are reopened as soon as the GT's own idle residency (`tile*/gt*/gtidle/idle_residency_ms`, free to read) shows it spending more than 5% of a sample interval awake: busy appears one sample after work starts, and the first busy sample is already a full-interval delta. Without that sysfs attribute (i915, older xe) the events stay open as before. See VIEWERS.md, "Where the daemon's time goes".
 
 ### `topswatch_gpu_engine_busy_percent`
 - **Source:** Same `perf_event_open` fds as `topswatch_gpu_utilization_percent`, reported per engine

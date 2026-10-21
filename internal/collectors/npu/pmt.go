@@ -6,14 +6,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/scottmbaker/topswatch/internal/sysfile"
 )
 
 const pmtBasePath = "/sys/class/intel_pmt"
 
 // pmtDevice represents a discovered PMT telemetry device.
 type pmtDevice struct {
-	path     string // e.g. /sys/class/intel_pmt/telem3
-	telemBuf []byte // raw telemetry buffer contents
+	path     string        // e.g. /sys/class/intel_pmt/telem3
+	telem    *sysfile.File // the telem region, held open
+	telemBuf []byte        // raw telemetry buffer contents
 }
 
 // discoverPMT scans /sys/class/intel_pmt/telem* for a telemetry device
@@ -47,21 +50,33 @@ func discoverPMT(gen CPUGen) (*pmtDevice, error) {
 
 		guid := strings.TrimSpace(string(guidBytes))
 		if guidSet[guid] {
-			return &pmtDevice{path: telemDir}, nil
+			f, err := sysfile.Open(filepath.Join(telemDir, "telem"))
+			if err != nil {
+				return nil, fmt.Errorf("cannot open PMT telem buffer: %w", err)
+			}
+			return &pmtDevice{path: telemDir, telem: f}, nil
 		}
 	}
 
 	return nil, fmt.Errorf("no PMT telemetry device found for %s (tried GUIDs: %v)", gen, guids)
 }
 
-// readBuffer reads the raw telemetry buffer from the PMT device.
+// readBuffer re-reads the raw telemetry buffer from the PMT device. The
+// region is a few hundred bytes of MMIO; the cost is the uncached reads,
+// not the syscall.
 func (p *pmtDevice) readBuffer() error {
-	data, err := os.ReadFile(filepath.Join(p.path, "telem"))
+	data, err := p.telem.Bytes()
 	if err != nil {
 		return fmt.Errorf("cannot read PMT telem buffer: %w", err)
 	}
 	p.telemBuf = data
 	return nil
+}
+
+func (p *pmtDevice) close() {
+	if p != nil {
+		p.telem.Close() //nolint:errcheck
+	}
 }
 
 // readU32 reads a 32-bit value at the given byte offset.

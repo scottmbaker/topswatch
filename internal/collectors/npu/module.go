@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/scottmbaker/topswatch/internal/module"
+	"github.com/scottmbaker/topswatch/internal/sysfile"
 )
 
 const defaultDriverPath = "/sys/bus/pci/drivers/intel_vpu"
@@ -19,6 +20,11 @@ type Module struct {
 	gen           CPUGen
 	memTotalBytes uint64
 	info          module.DeviceInfo
+
+	// Sampled attributes, held open (see sysfile). memUtil is nil on
+	// kernels without npu_memory_utilization.
+	busyTime *sysfile.File
+	memUtil  *sysfile.File
 
 	// PMT state (nil if PMT unavailable)
 	pmt  *pmtDevice
@@ -101,10 +107,16 @@ func (m *Module) Init() error {
 	}
 
 	// Prime the busy time baseline
-	if busyUs, err := readBusyTimeUs(m.sysfsDir); err == nil {
-		m.prevBusyUs = busyUs
-		m.prevBusyTime = time.Now()
+	if f, err := openBusyTime(m.sysfsDir); err == nil {
+		m.busyTime = f
+		if busyUs, err := f.Uint(); err == nil {
+			m.prevBusyUs = busyUs
+			m.prevBusyTime = time.Now()
+		}
+	} else {
+		log.Printf("[npu] busy time unavailable: %v (utilization disabled)", err)
 	}
+	m.memUtil = openMemoryUtilization(m.sysfsDir)
 
 	log.Printf("[npu] initialized: %s (%s), driver %s, firmware %s",
 		gen, pciID, driverVer, fwVer)
@@ -119,7 +131,7 @@ func (m *Module) Collect() ([]module.Metric, error) {
 	// --- Sysfs metrics ---
 
 	// Utilization (delta-based)
-	if busyUs, err := readBusyTimeUs(m.sysfsDir); err == nil {
+	if busyUs, ok := heldUint(m.busyTime); ok {
 		now := time.Now()
 		if !m.prevBusyTime.IsZero() {
 			deltaUs := busyUs - m.prevBusyUs
@@ -144,7 +156,7 @@ func (m *Module) Collect() ([]module.Metric, error) {
 	// Memory (PTL+ only). On integrated NPUs the "capacity" is system RAM
 	// since there's no dedicated VRAM, so we also emit a percent and a
 	// total alongside the absolute used bytes.
-	if memStr, err := readMemoryUtilization(m.sysfsDir); err == nil && memStr != "" {
+	if memStr, ok := heldString(m.memUtil); ok && memStr != "" {
 		if bytes, ok := parseMemoryBytes(memStr); ok {
 			metrics = append(metrics, module.Metric{
 				Name: "memory_used", Value: float64(bytes), Unit: "bytes",
@@ -263,5 +275,24 @@ func (m *Module) collectPMT() []module.Metric {
 }
 
 func (m *Module) Close() error {
+	m.busyTime.Close() //nolint:errcheck
+	m.memUtil.Close()  //nolint:errcheck
+	m.pmt.close()
 	return nil
+}
+
+func heldUint(f *sysfile.File) (uint64, bool) {
+	if f == nil {
+		return 0, false
+	}
+	v, err := f.Uint()
+	return v, err == nil
+}
+
+func heldString(f *sysfile.File) (string, bool) {
+	if f == nil {
+		return "", false
+	}
+	s, err := f.String()
+	return s, err == nil
 }
