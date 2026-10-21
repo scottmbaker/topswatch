@@ -22,6 +22,13 @@ workload is running on the 3D pipeline, the compute units or the video
 decoder, which the single utilization number cannot. See
 [Expanded GPU view](#expanded-gpu-view).
 
+The daemon is built to disturb the device it watches as little as it
+can: every counter is read in place through a descriptor held open, the
+GPU's engine counters are released whenever the GPU is idle so it can
+power down, and an idle Panther Lake laptop draws the same package power
+with the daemon running as without it. See
+[Daemon overhead](#daemon-overhead).
+
 ![topswatch-gui showing the CPU, NPU and GPU dashboard on a Panther Lake device](docs/images/topswatch-gui.png)
 
 *The desktop viewer on a Core Ultra 5 335. The web UI shows the same
@@ -140,13 +147,48 @@ All four share the headline cards and charts; the web UI, TUI and GUI
 can also open the [expanded GPU view](#expanded-gpu-view), one bar per
 engine with the media clock.
 
+### Daemon overhead
+
+The daemon's own cost, measured on a Core Ultra X7 358H laptop (16
+threads, ~490 processes, kernel 6.18) at the default 1s interval:
+
+| | Daemon off | Daemon running |
+|---|---|---|
+| CPU, share of one core | | 1.1% |
+| Package power, idle, screen off | 0.28 W | 0.28 W |
+| Platform power (psys), idle, screen off | 0.3 W | 0.4 W |
+
+What keeps it there:
+
+- **Counters are read in place.** Every sysfs and procfs attribute the
+  daemon samples is opened once and re-read with `pread` each tick: one
+  syscall per value instead of seven. The kernel time that remains is in
+  the attributes themselves (the battery's ACPI method, GT and PMT
+  register reads), not in the file system.
+- **GPU engine counters are released while the GPU is idle.** Holding
+  them open keeps the GT awake for the GuC's engine statistics, which was
+  measured at 1.15 W of package power on an idle laptop, the daemon's
+  whole idle cost. After five idle samples they are closed and the
+  engines report 0%; they reopen within a sample of the GPU doing work.
+- **GPU clients come from the kernel's list** in debugfs, so only those
+  processes' open files are scanned. The top-CPU list and NPU client
+  discovery still walk every process, at `process_rescan` and four times
+  that respectively.
+- **`cpus`** can pin the daemon to the low-power cores. Measured to change
+  nothing, since the daemon's CPU work is too small to register; it is
+  there for keeping the daemon off the cores a workload uses.
+
+The assessment behind this, including why `libpfc` and eBPF would not
+lower it, is in [VIEWERS.md](VIEWERS.md), "Where the daemon's time goes".
+
 ### Viewer overhead
 
 Measured on a Core Ultra 5 335 (Panther Lake) running Ubuntu 24.04 with
 the daemon at its default 1s interval. Numbers are the **extra** CPU each
 viewer adds to the machine, as a percentage of one core, including what
-it costs the daemon and the display stack. The daemon alone uses about
-2.8%.
+it costs the daemon and the display stack. The daemon alone used about
+2.8% when these were taken, before the changes under
+[Daemon overhead](#daemon-overhead).
 
 | Viewer | Added CPU | Notes |
 |---|---|---|
