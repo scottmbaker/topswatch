@@ -15,6 +15,13 @@ terminal dashboard (`--tui`, works over SSH) and a small desktop viewer
 (`topswatch-gui`); both attach to a running daemon, locally or remotely.
 See [Viewers](#viewers).
 
+Every viewer can expand the GPU row into one bar per engine: render,
+compute, copy, video (the VDBOX decoder and encoder) and video enhance,
+plus the media engine's own clock. That shows at a glance whether a
+workload is running on the 3D pipeline, the compute units or the video
+decoder, which the single utilization number cannot. See
+[Expanded GPU view](#expanded-gpu-view).
+
 ![topswatch-gui showing the CPU, NPU and GPU dashboard on a Panther Lake device](docs/images/topswatch-gui.png)
 
 *The desktop viewer on a Core Ultra 5 335. The web UI shows the same
@@ -129,6 +136,10 @@ touch hardware, so they need no root, no config file, and no special
 permissions. They default to `localhost:9876` and take `--connect` for
 another host.
 
+All four share the headline cards and charts; the web UI, TUI and GUI
+can also open the [expanded GPU view](#expanded-gpu-view), one bar per
+engine with the media clock.
+
 ### Viewer overhead
 
 Measured on a Core Ultra 5 335 (Panther Lake) running Ubuntu 24.04 with
@@ -192,6 +203,14 @@ If the daemon is not reachable the TUI shows the error in its footer and
 keeps retrying; it fills in as soon as the daemon answers.
 
 ### Expanded GPU view
+
+![The expanded GPU section: one bar per engine and the media clock](docs/images/topswatch-gpu-engines.png)
+
+*The expanded GPU section as the desktop viewer shows it, on a Core
+Ultra X7 358H while a video pipeline runs: the video and video-enhance
+engines busy, render and compute idle, and the media clock at its
+600 MHz floor with the green spikes in the chart marking decode bursts.
+The utilization card alone says only "38 %".*
 
 `e` in the terminal or desktop viewer (or `--engines` at start), and the
 **Engines** button in the web UI's header next to Procs and Cores, open
