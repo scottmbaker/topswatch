@@ -18,8 +18,9 @@ See [Viewers](#viewers).
 ![topswatch-gui showing the CPU, NPU and GPU dashboard on a Panther Lake device](docs/images/topswatch-gui.png)
 
 *The desktop viewer on a Core Ultra 5 335. The web UI shows the same
-cards and charts plus per-core, per-engine and process detail; the
-terminal viewer shows them in text (see [Viewers](#viewers)).*
+cards and charts plus per-core and process detail; the terminal viewer
+shows them in text. All three can expand the GPU row into one bar per
+engine (see [Viewers](#viewers)).*
 
 Despite the name, TopsWatch doesn't actually monitor TOPS. It monitors
 the behavior of hardware. AI thought TopsWatch would be a catchy name,
@@ -52,8 +53,9 @@ Per-core metrics carry `core` and `core_type` (`performance`/`efficient`/`low_po
 | Metric | Unit | Source |
 |--------|------|--------|
 | Utilization | % | `perf_event_open` engine-active/total ticks (xe) or busy-ns (i915) |
-| Per-engine busy | % | Same, per engine label |
+| Per-engine busy (render, compute, copy, video, video enhance) | % | Same, per engine label |
 | Frequency (actual/requested/min/max/rp0/rpe/rpn) | MHz | Xe sysfs `tile*/gt*/freq0/` or i915 `gt_*_freq_mhz` |
+| Media GT frequency (actual/requested) | MHz | Xe sysfs `freq0/` of the GT that holds only video engines (Meteor Lake and later) |
 | Temperature | °C | hwmon `temp*_input` (when xe_hwmon present) |
 | Power | W | RAPL `uncore` energy_uj (delta); falls back to the GT energy counter in Intel PMT where the kernel registers no uncore zone (a boot-time race in the RAPL driver; `modprobe -r intel_rapl_msr && modprobe intel_rapl_msr` restores the zone) |
 
@@ -117,7 +119,7 @@ every viewer attaches to it.
 
 | Viewer | Where it runs | Needs | Best for |
 |---|---|---|---|
-| Web UI (`/`) | any browser | nothing extra | full dashboard: per-core, per-engine, processes, warnings |
+| Web UI (`/`) | any browser | nothing extra | full dashboard: per-core, GPU engines, processes, warnings |
 | Terminal `--tui` | any terminal, incl. SSH | the `topswatch` binary | remote shells, headless devices, low overhead |
 | Desktop `topswatch-gui` | Ubuntu Desktop (X11/Wayland) | separately built binary | a small always-on window on the device itself |
 | `--text` | any terminal | the `topswatch` binary | one-shot readout, scripts |
@@ -163,8 +165,10 @@ Flags:
 | `--connect ADDR` | `localhost:9876` | daemon to attach to: `host`, `host:port`, `[v6addr]:port`, or `http://…` |
 | `--refresh N` | `0` (stream) | `0` follows the daemon's SSE stream and redraws once per sample; `N` (e.g. `5s`) polls instead, for a slower, cheaper display |
 | `--energy` | off | add the watt-hour panel and its keys (s/b/c); see [Measuring energy](#measuring-energy-watt-hours) |
+| `--engines` | off | start with the GPU row expanded; see [Expanded GPU view](#expanded-gpu-view) |
 
-Keys: `q` quit · `r` cycle history range (5min / 1h / 24h) · `p` pause.
+Keys: `q` quit · `r` cycle history range (5min / 1h / 24h) · `p` pause ·
+`e` expand/collapse the GPU engines.
 
 The layout adapts to the terminal: 40 rows or more shows cards, sparklines
 and a braille chart per module; below about 20 rows the charts are
@@ -186,6 +190,36 @@ ssh user@device ./topswatch --tui
 
 If the daemon is not reachable the TUI shows the error in its footer and
 keeps retrying; it fills in as soon as the daemon answers.
+
+### Expanded GPU view
+
+`e` in the terminal or desktop viewer (or `--engines` at start), and the
+**Engines** button in the web UI's header next to Procs and Cores, open
+the GPU row into one line per engine, with the busy percentage, a bar
+and a sparkline, and add a **Media freq** card when the device has a
+media GT:
+
+| Engine | Kernel name | What runs there |
+|---|---|---|
+| Render | `rcs` | 3D, display composition, OpenGL/Vulkan graphics |
+| Compute | `ccs` | GPGPU: OpenCL, Level Zero, AI inference on the GPU |
+| Copy | `bcs` | the blitter: buffer uploads and transfers |
+| Video | `vcs` | the fixed-function codec (one row per VDBOX): **decode and encode** |
+| Video enhance | `vecs` | video post-processing (one row per VEBOX): scaling, colour conversion, deinterlace |
+
+The percentages are the same `engine_busy` series the Prometheus endpoint
+exports, read from the kernel's GPU PMU; the rows appear for whichever
+engines the kernel exposes on the detected part.
+
+**Video decode.** The kernel reports the video engines as a whole: a
+decode and an encode session both show as `vcs` busy, and nothing in
+sysfs, the PMU or fdinfo says which codec, resolution or frame rate is in
+flight. What the daemon can tell you is whether the decoder is doing
+anything (`vcs` busy, and on Meteor Lake and later the media GT's own
+clock, which idles at its floor until a video session starts), whether
+the output is being post-processed (`vecs`), and which process is doing
+it: the web UI's process table classifies a client as `video` when its
+cumulative cycles are on `vcs`/`vecs`.
 
 ### Desktop viewer (`topswatch-gui`)
 
@@ -214,9 +248,11 @@ sudo apt install gcc libgl1-mesa-dev xorg-dev
 make gui GUI_TAGS="gui x11"
 ```
 
-Flags are `--connect` (as above) and `--refresh` (default `1s`). `q` or
-`Escape` closes the window. The status bar shows the daemon address, the
-time of the last update, and any connection error.
+Flags are `--connect` (as above), `--refresh` (default `1s`) and
+`--engines` (start with the GPU row expanded). `q` or `Escape` closes the
+window and `e` expands or collapses the GPU engines, as in the TUI. The
+status bar shows the daemon address, the time of the last update, and
+any connection error.
 
 ### Using the viewers with the Docker deployment
 

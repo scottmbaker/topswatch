@@ -119,9 +119,13 @@ func TestEndpoints(t *testing.T) {
 	if err != nil || len(h) != 29 {
 		t.Fatalf("History(default): %d entries, %v", len(h), err)
 	}
-	img, err := c.Snapshot(ctx)
+	img, err := c.Snapshot(ctx, SnapshotOptions{})
 	if err != nil || len(img) != 10 || img[0] != 0xff {
 		t.Fatalf("Snapshot: %d bytes, %v", len(img), err)
+	}
+	img, err = c.Snapshot(ctx, SnapshotOptions{GPUEngines: true})
+	if err != nil || len(img) != 10 || img[0] != 0xff {
+		t.Fatalf("Snapshot(engines): %d bytes, %v", len(img), err)
 	}
 }
 

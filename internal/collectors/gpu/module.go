@@ -18,6 +18,8 @@ type Module struct {
 	// Frequency readers (one will be non-nil)
 	xeFreq   *freqReader
 	i915Freq *i915FreqReader
+	// Media GT frequency (xe only; nil on a single-GT part)
+	mediaFreq *freqReader
 
 	// hwmon reader (may be nil if no hwmon found)
 	hwmon *hwmonReader
@@ -66,6 +68,9 @@ func (m *Module) Init() error {
 	m.xeFreq = discoverFreqDir(card.deviceDir)
 	if m.xeFreq != nil {
 		log.Printf("[gpu] Xe frequency sysfs found at %s", m.xeFreq.freqDir)
+		if m.mediaFreq = discoverMediaFreqDir(card.deviceDir); m.mediaFreq != nil {
+			log.Printf("[gpu] media GT frequency sysfs found at %s", m.mediaFreq.freqDir)
+		}
 	} else {
 		// Try i915 fallback
 		m.i915Freq = discoverI915Freq(card.cardName)
@@ -234,6 +239,18 @@ func (m *Module) collectFreq() []module.Metric {
 				Name: "frequency_rpn", Value: v, Unit: "MHz",
 				Labels: map[string]string{"desc": "minimum capable"},
 			})
+		}
+		if m.mediaFreq != nil {
+			if v, ok := m.mediaFreq.readFreqMHz("act_freq"); ok {
+				metrics = append(metrics, module.Metric{
+					Name: "media_frequency_actual", Value: v, Unit: "MHz",
+				})
+			}
+			if v, ok := m.mediaFreq.readFreqMHz("cur_freq"); ok {
+				metrics = append(metrics, module.Metric{
+					Name: "media_frequency_requested", Value: v, Unit: "MHz",
+				})
+			}
 		}
 	} else if m.i915Freq != nil {
 		if v, ok := m.i915Freq.readFreqMHz("gt_act_freq_mhz"); ok {

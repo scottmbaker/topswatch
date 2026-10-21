@@ -34,6 +34,50 @@ func discoverFreqDir(deviceDir string) *freqReader {
 	return nil
 }
 
+// discoverMediaFreqDir finds the frequency directory of the media GT.
+// Since Meteor Lake the video engines (vcs, vecs) sit on their own GT
+// with its own clock domain, exposed by xe as a second gt*/freq0/. A GT
+// is recognised as the media one by its engines/ directory holding only
+// video engine classes; a GPU with a single GT (or a kernel without the
+// engines directory) reports none.
+func discoverMediaFreqDir(deviceDir string) *freqReader {
+	for _, pattern := range []string{
+		filepath.Join(deviceDir, "tile*", "gt*"),
+		filepath.Join(deviceDir, "gt", "gt*"),
+	} {
+		gts, _ := filepath.Glob(pattern)
+		for _, gt := range gts {
+			if !isMediaGT(gt) {
+				continue
+			}
+			freqDir := filepath.Join(gt, "freq0")
+			if _, err := os.Stat(filepath.Join(freqDir, "act_freq")); err == nil {
+				return &freqReader{freqDir: freqDir}
+			}
+		}
+	}
+	return nil
+}
+
+// isMediaGT reports whether a gt*/ directory holds video engines and no
+// render, compute or copy engine.
+func isMediaGT(gtDir string) bool {
+	entries, err := os.ReadDir(filepath.Join(gtDir, "engines"))
+	if err != nil {
+		return false
+	}
+	video := false
+	for _, e := range entries {
+		switch e.Name() {
+		case "vcs", "vecs":
+			video = true
+		case "rcs", "ccs", "bcs":
+			return false
+		}
+	}
+	return video
+}
+
 // readFreqMHz reads a frequency attribute file and returns the value in MHz.
 // The Xe driver writes plain integers (MHz) to these files.
 func (f *freqReader) readFreqMHz(attr string) (float64, bool) {

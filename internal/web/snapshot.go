@@ -58,7 +58,10 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	hist := s.coll.History()
 	devices := s.coll.Devices()
 
-	img := renderSnapshot(devices, hist)
+	// ?gpu=engines expands the GPU section with one bar per engine and
+	// the media GT frequency; the GUI's "e" key toggles it.
+	opts := SnapshotOptions{GPUEngines: r.URL.Query().Get("gpu") == "engines"}
+	img := renderSnapshotOpts(devices, hist, opts)
 
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "no-store")
@@ -81,17 +84,75 @@ const (
 	memBarH     = 18 // stacked system-memory bar under the CPU cards
 )
 
+// SnapshotOptions selects the optional parts of the rendered dashboard.
+type SnapshotOptions struct {
+	// GPUEngines expands the GPU section: one bar per engine under the
+	// cards, and the media GT frequency as an extra card.
+	GPUEngines bool
+}
+
+// Engine-panel geometry: a title row, then one row per engine.
+const (
+	engineTitleH = 16
+	engineRowH   = 14
+	enginePadB   = 6
+)
+
+// enginesPanelH is the height of the engines panel for n engines (one
+// row of explanation when there are none).
+func enginesPanelH(n int) int {
+	if n == 0 {
+		n = 1
+	}
+	return engineTitleH + n*engineRowH + enginePadB
+}
+
 // moduleHeight is a module section's height; the CPU section carries the
-// memory bar when the daemon reports system memory.
-func moduleHeight(mod string, hasMem bool) int {
+// memory bar when the daemon reports system memory, the GPU section the
+// engines panel when the view is expanded.
+func moduleHeight(mod string, hasMem bool, engines []string, expanded bool) int {
 	h := sectionHdrH + cardH + 6 + chartH + moduleGap
 	if mod == "cpu" && hasMem {
 		h += memBarH
 	}
+	if mod == "gpu" && expanded {
+		h += enginesPanelH(len(engines))
+	}
 	return h
 }
 
+// cardDefs is the card row for a module: the headline cards, plus the
+// detail cards the daemon reports when the module's view is expanded.
+func cardDefs(mod string, hist []collector.Sample, expanded bool) []metricdef.Def {
+	defs := metricdef.Cards[mod]
+	if !expanded {
+		return defs
+	}
+	out := append([]metricdef.Def(nil), defs...)
+	for _, d := range metricdef.Detail[mod] {
+		if _, ok := lastMetricValue(hist, mod, d); ok {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// latestEngines returns the GPU engine labels of the newest sample that
+// has any, in display order.
+func latestEngines(hist []collector.Sample) []string {
+	for i := len(hist) - 1; i >= 0; i-- {
+		if engs := metricdef.EngineLabels(hist[i].Metrics["gpu"]); len(engs) > 0 {
+			return engs
+		}
+	}
+	return nil
+}
+
 func renderSnapshot(devices map[string]module.DeviceInfo, hist []collector.Sample) image.Image {
+	return renderSnapshotOpts(devices, hist, SnapshotOptions{})
+}
+
+func renderSnapshotOpts(devices map[string]module.DeviceInfo, hist []collector.Sample, opts SnapshotOptions) image.Image {
 	// Determine which modules to render (only those present in devices).
 	modules := make([]string, 0, 3)
 	for _, name := range metricdef.Order {
@@ -108,10 +169,15 @@ func renderSnapshot(devices map[string]module.DeviceInfo, hist []collector.Sampl
 		mem, hasMem = metricdef.Memory(last.Metrics["cpu"], last.Metrics["gpu"])
 	}
 
+	var engines []string
+	if opts.GPUEngines {
+		engines = latestEngines(hist)
+	}
+
 	// Compute height.
 	h := snapPad + headerH + infoH + snapPad
 	for _, name := range modules {
-		h += moduleHeight(name, hasMem)
+		h += moduleHeight(name, hasMem, engines, opts.GPUEngines)
 	}
 
 	img := image.NewRGBA(image.Rect(0, 0, snapW, h))
@@ -131,8 +197,8 @@ func renderSnapshot(devices map[string]module.DeviceInfo, hist []collector.Sampl
 	// --- Module sections ---
 	y := snapPad + headerH
 	for _, name := range modules {
-		drawModuleSection(c, name, y, hist, mem, hasMem)
-		y += moduleHeight(name, hasMem)
+		drawModuleSection(c, name, y, hist, mem, hasMem, engines, opts.GPUEngines)
+		y += moduleHeight(name, hasMem, engines, opts.GPUEngines)
 	}
 
 	// --- Info panel ---
@@ -141,8 +207,8 @@ func renderSnapshot(devices map[string]module.DeviceInfo, hist []collector.Sampl
 	return img
 }
 
-func drawModuleSection(c *snapCanvas, mod string, y int, hist []collector.Sample, mem metricdef.MemoryBar, hasMem bool) {
-	defs := metricdef.Cards[mod]
+func drawModuleSection(c *snapCanvas, mod string, y int, hist []collector.Sample, mem metricdef.MemoryBar, hasMem bool, engines []string, expanded bool) {
+	defs := cardDefs(mod, hist, expanded)
 	if len(defs) == 0 {
 		return
 	}
@@ -169,8 +235,65 @@ func drawModuleSection(c *snapCanvas, mod string, y int, hist []collector.Sample
 		chartY += memBarH
 	}
 
+	// Engines panel (expanded GPU section only)
+	if mod == "gpu" && expanded {
+		ph := enginesPanelH(len(engines))
+		drawEngines(c, snapPad, chartY, snapW-2*snapPad, ph-enginePadB, engines, hist)
+		chartY += ph
+	}
+
 	// Chart
-	drawChart(c, snapPad, chartY, snapW-2*snapPad, chartH, mod, hist)
+	drawChart(c, snapPad, chartY, snapW-2*snapPad, chartH, mod, hist, defs)
+}
+
+// drawEngines draws one row per GPU engine: class, name, a bar of the
+// latest busy fraction, and the number. Rows follow metricdef.Engines
+// order so the panel is stable from frame to frame.
+func drawEngines(c *snapCanvas, x, y, w, h int, engines []string, hist []collector.Sample) {
+	c.fill(x, y, w, h, cBgCard)
+	c.rectBorder(x, y, w, h, cBorder)
+	c.text(x+8, y+12, "ENGINES", cTextDim)
+	rowY := y + engineTitleH
+	if len(engines) == 0 {
+		c.text(x+8, rowY+10, "no per-engine data: the daemon needs perf access to the GPU PMU", cTextDim)
+		return
+	}
+	var latest []module.Metric
+	for i := len(hist) - 1; i >= 0; i-- {
+		if len(metricdef.EngineLabels(hist[i].Metrics["gpu"])) > 0 {
+			latest = hist[i].Metrics["gpu"]
+			break
+		}
+	}
+	const (
+		classX = 8
+		nameX  = 8 + 6*7
+		barX   = nameX + 15*7
+		valW   = 8 * 7
+	)
+	barW := w - barX - valW - 16
+	for _, eng := range engines {
+		e := metricdef.EngineClass(eng)
+		col := hexColor(e.Color)
+		v, _ := metricdef.EngineValue(latest, eng)
+		if v < 0 {
+			v = 0
+		}
+		if v > 100 {
+			v = 100
+		}
+		ty := rowY + 10
+		c.text(x+classX, ty, strings.ToUpper(eng), col)
+		c.text(x+nameX, ty, e.Label, cText)
+		if barW > 20 {
+			bx, by, bh := x+barX, rowY+2, engineRowH-5
+			c.fill(bx, by, barW, bh, cBarFree)
+			c.rectBorder(bx, by, barW, bh, cBorder)
+			c.fill(bx+1, by+1, int(v/100*float64(barW-2)), bh-2, col)
+		}
+		c.textRight(x+w-8, ty, metricdef.Format(v, metricdef.EngineBusy)+" %", cText)
+		rowY += engineRowH
+	}
 }
 
 // drawMemoryBar draws system RAM as a stacked bar: GPU buffers (part of
@@ -268,7 +391,7 @@ func drawSparkline(c *snapCanvas, x, y, w, h int, mod string, def metricdef.Def,
 	}
 }
 
-func drawChart(c *snapCanvas, x, y, w, h int, mod string, hist []collector.Sample) {
+func drawChart(c *snapCanvas, x, y, w, h int, mod string, hist []collector.Sample, defs []metricdef.Def) {
 	// Panel
 	c.fill(x, y, w, h, cBgCard)
 	c.rectBorder(x, y, w, h, cBorder)
@@ -289,7 +412,6 @@ func drawChart(c *snapCanvas, x, y, w, h int, mod string, hist []collector.Sampl
 	}
 
 	// Each metric in module
-	defs := metricdef.Cards[mod]
 	for _, def := range defs {
 		// Card-only metrics: their scales have nothing to do with the
 		// util/freq/power/temp lines.

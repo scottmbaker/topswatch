@@ -112,6 +112,7 @@ type frame struct {
 	recordFor time.Duration
 	mem       metricdef.MemoryBar
 	hasMem    bool
+	engines   bool // expanded GPU view: one row per engine
 }
 
 func render(f frame, l layout) string {
@@ -156,18 +157,93 @@ func renderModule(f frame, mod string, l layout) string {
 	b.WriteString(title + " " + desc + "\n")
 
 	defs := metricdef.Cards[mod]
+	if mod == "gpu" && f.engines {
+		defs = withDetail(f.store, mod, defs)
+	}
 	b.WriteString(renderCards(f.store, mod, defs, l.width, l.sparkN))
 	if mod == "cpu" && f.hasMem {
 		b.WriteString(renderMemoryBar(f.mem, l.width))
 		b.WriteByte('\n')
 	}
+	if mod == "gpu" && f.engines {
+		b.WriteString(renderEngines(f.store, l.width, l.sparkN))
+	}
 	if l.chartH > 0 {
-		b.WriteString(f.charts.get(mod, l.width, l.chartH, f.store.gen, func() string {
+		// The expanded GPU chart carries the detail series, so it is
+		// cached apart from the collapsed one.
+		cacheKey := mod
+		if mod == "gpu" && f.engines {
+			cacheKey += "+engines"
+		}
+		b.WriteString(f.charts.get(cacheKey, l.width, l.chartH, f.store.gen, func() string {
 			return renderChart(f.store, mod, defs, l.width, l.chartH)
 		}))
 	}
 	if l.gap {
 		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// withDetail appends the module's detail metrics the daemon actually
+// reports (a part without a media GT has no media frequency, and an empty
+// card would only raise the question).
+func withDetail(st *store, mod string, defs []metricdef.Def) []metricdef.Def {
+	out := append([]metricdef.Def(nil), defs...)
+	for _, d := range metricdef.Detail[mod] {
+		if st.has(mod, d.Key) {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// enginesHeight is the number of lines renderEngines takes for n engines:
+// a title line plus one row per engine, or one note when there are none.
+func enginesHeight(n int) int {
+	if n == 0 {
+		return 2
+	}
+	return n + 1
+}
+
+// renderEngines lists the GPU engines one per row: class, name, busy
+// percentage, a bar, and a sparkline of recent values. Rows are in
+// metricdef.Engines order so the layout does not shuffle between samples.
+func renderEngines(st *store, w, sparkN int) string {
+	var b strings.Builder
+	b.WriteString(styDim.Render("ENGINES") + "\n")
+	engs := st.engines()
+	if len(engs) == 0 {
+		b.WriteString(styDim.Render(truncate("  (no per-engine data: the daemon needs perf access to the GPU PMU)", w)) + "\n")
+		return b.String()
+	}
+	const (
+		classW = 6  // " VECS "
+		nameW  = 14 // "Video enhance "
+		valW   = 8  // "100.0 % "
+		barW   = 20
+	)
+	for _, eng := range engs {
+		e := metricdef.EngineClass(eng)
+		c := colorStyle(e.Color)
+		pts := st.get("gpu", engineKey(eng))
+		v, _ := st.last("gpu", engineKey(eng))
+		line := pad(c.Render(strings.ToUpper(eng)), classW) + pad(e.Label, nameW)
+		line += pad(c.Bold(true).Render(metricdef.Format(v, metricdef.EngineBusy))+" "+styDim.Render("%"), valW)
+		rest := w - classW - nameW - valW
+		if rest >= barW {
+			filled := int(v/100*float64(barW) + 0.5)
+			if filled > barW {
+				filled = barW
+			}
+			line += c.Render(strings.Repeat("█", filled)) + styDim.Render(strings.Repeat("░", barW-filled))
+			rest -= barW
+		}
+		if rest >= 12 {
+			line += "  " + c.Render(sparkline(values(pts, sparkN), rest-2, 100))
+		}
+		b.WriteString(truncate(line, w) + "\n")
 	}
 	return b.String()
 }
@@ -333,7 +409,7 @@ func renderFooter(f frame, w int) string {
 		b.WriteString(styDim.Render("no warnings"))
 	}
 	b.WriteByte('\n')
-	keys := "q quit   r cycle range   p pause"
+	keys := "q quit   r cycle range   p pause   e GPU engines"
 	if f.energy != nil {
 		keys += "   s energy start/stop   t record " + shortDuration(f.recordFor) + "   b idle baseline   c clear"
 	}

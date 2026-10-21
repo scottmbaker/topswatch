@@ -95,9 +95,13 @@ func Sample(i int) collector.Sample {
 		m("frequency_rpn", 300, "MHz"),
 		m("power", wave(i, 8, 5, 6), "W"),
 		m("temperature", wave(i, 52, 8, 12), "C"),
+		m("media_frequency_actual", wave(i, 1100, 500, 8), "MHz"),
+		m("media_frequency_requested", wave(i, 1200, 500, 8), "MHz"),
 	}
-	for _, eng := range []string{"rcs0", "ccs0", "vcs0", "vecs0"} {
-		gpu = append(gpu, ml("busy", wave(i+len(eng), 30, 30, 7), "%",
+	// Collector order is map iteration order; shuffle here too so the
+	// viewers must sort rather than rely on it.
+	for k, eng := range []string{"vcs0", "rcs0", "bcs0", "vecs0", "ccs0"} {
+		gpu = append(gpu, ml("engine_busy", wave(i+k*5, 30, 30, 7), "%",
 			map[string]string{"engine": eng}))
 	}
 	classMem := map[string]float64{

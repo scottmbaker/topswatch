@@ -16,6 +16,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -41,6 +42,9 @@ type Options struct {
 	// Record is the length of the timed measurement started by the
 	// "Record" button (default 5m).
 	Record time.Duration
+	// Engines opens the expanded GPU view (one bar per engine, media GT
+	// frequency) at start; the e key toggles it.
+	Engines bool
 }
 
 // Run opens the window and blocks until it is closed.
@@ -67,6 +71,11 @@ func Run(opts Options) error {
 	status := widget.NewLabel("connecting to " + c.Base() + " …")
 	status.Truncation = fyne.TextTruncateEllipsis
 
+	// The expanded GPU view is a different snapshot URL; the flag is read
+	// by the refresh goroutine and flipped by the e key on the UI one.
+	var engines atomic.Bool
+	engines.Store(opts.Engines)
+
 	var panel *energyPanel
 	if opts.Energy {
 		panel = newEnergyPanel(opts.Baseline, opts.Record)
@@ -91,6 +100,8 @@ func Run(opts Options) error {
 		switch r {
 		case 'q':
 			w.Close()
+		case 'e':
+			engines.Store(!engines.Load())
 		case 's':
 			if panel != nil {
 				panel.session.Toggle()
@@ -116,7 +127,7 @@ func Run(opts Options) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	w.SetOnClosed(cancel)
-	go refreshLoop(ctx, c, opts.Refresh, img, status)
+	go refreshLoop(ctx, c, opts.Refresh, img, status, &engines)
 	if panel != nil {
 		go panel.loop(ctx, c, opts.Refresh)
 	}
@@ -127,11 +138,11 @@ func Run(opts Options) error {
 
 // refreshLoop fetches the snapshot every interval. UI mutations go
 // through fyne.Do, which Fyne requires from non-main goroutines.
-func refreshLoop(ctx context.Context, c *client.Client, every time.Duration, img *canvas.Image, status *widget.Label) {
+func refreshLoop(ctx context.Context, c *client.Client, every time.Duration, img *canvas.Image, status *widget.Label, engines *atomic.Bool) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	fetch := func() {
-		data, err := c.Snapshot(ctx)
+		data, err := c.Snapshot(ctx, client.SnapshotOptions{GPUEngines: engines.Load()})
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -147,7 +158,7 @@ func refreshLoop(ctx context.Context, c *client.Client, every time.Duration, img
 		fyne.Do(func() {
 			img.Image = decoded
 			img.Refresh()
-			status.SetText(fmt.Sprintf("%s — updated %s — refresh %s — q to quit",
+			status.SetText(fmt.Sprintf("%s — updated %s — refresh %s — e GPU engines — q to quit",
 				c.Base(), time.Now().Format("15:04:05"), every))
 		})
 	}

@@ -457,10 +457,100 @@ No default was changed in this branch. Recommendation: keep the daemon at
 1s unless the ~2.6% matters on the target device, and prefer lowering
 viewer refresh first since that is free of side effects.
 
+## Expanded GPU view (2026-10-21)
+
+The GPU row in the TUI and GUI can be expanded with `e` (or opened with
+`--engines`) into one line per engine, with the busy percentage, a bar
+and a sparkline, plus a **Media freq** card and chart series when the
+device has a media GT. The rows are the daemon's existing `engine_busy`
+series; what changed is where they are shown.
+
+**One table for the engines.** `metricdef.Engines` names the five classes
+(render `rcs`, compute `ccs`, copy `bcs`, video `vcs`, video enhance
+`vecs`) with a label, a description and a colour, and
+`metricdef.Detail["gpu"]` lists the media frequency card. Both viewers
+read those, so the rows, their order and their colours are the same in
+the terminal and in the snapshot. An engine the table does not know (a
+future class, or a second instance such as `vcs1`) still renders, with
+its kernel name in upper case; rows are sorted by class order and then by
+name so the panel never shuffles between samples.
+
+**TUI.** The store keeps one series per engine (`engine_busy/<label>`)
+alongside the headline series, so sparklines and the `r` history tiers
+work for engines too (the history rings already bucket labelled metrics
+separately). The panel takes one line per engine plus a title; the
+layout budget shrinks the charts to make room, as it does for the energy
+panel. Width adapts: the bar goes first, then the sparkline, so a narrow
+terminal still shows class, name and number.
+
+**GUI.** The GUI shows the daemon's rendered `/snapshot.jpg`, so the
+expanded view is a query parameter, `?gpu=engines`, which the daemon's
+renderer turns into a panel of horizontal bars under the GPU cards and
+the extra card; the GUI's `e` key switches which URL it fetches. The
+default snapshot is pixel-identical to before (its golden is unchanged);
+the expanded one has its own golden.
+
+**Web UI.** An **Engines** button beside Procs and Cores opens the same
+panel under the GPU cards: one row per engine with the role, a bar in
+the engine's colour, the percentage and a sparkline, with the media and
+render GT clocks in the panel title. While it is open a Media freq card
+joins the GPU cards and a green series joins the GPU chart; both are
+hidden again when it is closed, and never appear on a part that reports
+no media clock. `app.js` carries its own copy of the engine table
+(`ENGINES`), as it does of the metric definitions; the per-engine series
+live in the page's GPU history under `engine_busy/<label>` so the
+existing sparkline code draws them.
+
+**Media GT frequency.** On Meteor Lake and later the video engines sit
+on a second GT (`tile0/gt1` on xe) with its own clock domain. The
+collector finds it by its `engines/` directory holding only `vcs`/`vecs`
+and reports `media_frequency_actual` and `_requested`; the render GT's
+clock, which the existing cards show, does not move for a video-only
+load. Single-GT parts and i915 report nothing and the card stays hidden.
+
+**What the kernel does not say about video decode.** Decode and encode
+both run on `vcs` and the kernel counts them together; there is no
+per-codec, per-stream, resolution or frame-rate counter in sysfs, the
+PMU or fdinfo, and the media driver (iHD) exposes none either. So the
+decoder signal is: `vcs` busy, the media GT clock leaving its floor,
+`vecs` busy when the output is post-processed, and the process table's
+`video` class for the client doing it. The expanded view shows the first
+three; the fourth stays in the web UI.
+
+**Verified on a Dell XPS (Core Ultra X7 358H, Panther Lake, kernel
+6.18-intel, xe).** The part has two GTs: `gt0` with `bcs ccs rcs`
+(900 to 2500 MHz) and `gt1` with `vcs vecs` (600 to 1200 MHz); the
+collector logged the media GT and reported all five engines. The
+machine was already running a demo that decodes video (a Python
+process, classed `video` in the process table, holding six DRM clients),
+which gave a steady baseline of about 17 % `vcs` and 20 % `vecs` with
+the media GT at its 600 MHz floor and `rcs`/`ccs` at zero. A 1080p
+H.264 clip decoded through VAAPI with `ffmpeg -hwaccel vaapi` then
+showed:
+
+| Load | `vcs` | `vecs` | media GT | render GT |
+|---|---|---|---|---|
+| baseline (demo only) | 17 % | 20 % | 600 MHz | 900 MHz |
+| ffmpeg decode, full speed (2700 frames in 9.3 s, ~290 fps) | 28 to 34 % | 36 to 47 % | 1200 MHz | 900 MHz |
+| ffmpeg decode, real time (30 fps) | 17 to 21 % | 21 to 24 % | 600 to 800 MHz | 900 MHz |
+| after | 16 % | 21 % | 600 MHz | 900 MHz |
+
+So a single 1080p30 stream barely registers on this decoder, the media
+clock is the clearer signal that a session is running, and the render
+GT did not move for any of it, which is why the media frequency is
+worth its own card. ffmpeg appeared in the process table as a `video`
+client at 40 % busy within one rescan interval and vanished when it
+exited. The TUI with `--engines` over SSH (110x46) and the
+`?gpu=engines` snapshot both rendered the five rows and the media
+frequency card with its step from 600 to 1200 MHz visible in the
+sparkline and the chart. Why `vecs` runs busier than `vcs` under a
+decode-only load was not investigated; the demo's own baseline shows
+the same ratio.
+
 ## Not done / follow-ups
 
-- Per-core and per-engine panels and the process table are web-only for
-  now; the TUI shows headline metrics.
+- Per-core panels and the process table are web-only for now; the TUI
+  shows headline metrics and, expanded, the GPU engines.
 - The GUI is deliberately minimal (image viewer). A native Fyne layout
   driven by `metricdef` would allow interaction, at the cost of a second
   renderer.

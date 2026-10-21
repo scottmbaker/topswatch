@@ -9,6 +9,7 @@
   // user explicitly opens what they want to see.
   let showProcs = false;
   let showCores = false;
+  let showEngines = false;
   // Last received processes payload, so toggling the button can re-render
   // immediately without waiting for the next SSE event.
   let lastProcesses = null;
@@ -104,6 +105,42 @@
     return parts.join('  \u00b7  ');
   }
 
+  // GPU engine classes for the Engines panel, in display order. Mirrors
+  // metricdef.Engines on the Go side. Video decode and encode both run on
+  // vcs; the kernel exposes no counter that separates them.
+  const ENGINES = [
+    { cls: 'rcs',  label: 'Render',        desc: '3D, display composition',    color: '#58a6ff' },
+    { cls: 'ccs',  label: 'Compute',       desc: 'GPGPU, AI inference',        color: '#bc8cff' },
+    { cls: 'bcs',  label: 'Copy',          desc: 'blitter, buffer transfers',  color: '#8b949e' },
+    { cls: 'vcs',  label: 'Video',         desc: 'decode and encode',          color: '#d29922' },
+    { cls: 'vecs', label: 'Video enhance', desc: 'scaling, VPP, deinterlace',  color: '#39d2c0' },
+  ];
+  const ENGINE_PREFIX = 'engine_busy/';
+  // Engine labels seen so far (rcs0, vcs0, ...), kept in ENGINES order
+  // then by name so the panel never reshuffles between samples.
+  let engineOrder = [];
+
+  function engineClass(label) {
+    var cls = label.replace(/[0-9]+$/, '');
+    for (var i = 0; i < ENGINES.length; i++) {
+      if (ENGINES[i].cls === cls) return ENGINES[i];
+    }
+    return { cls: cls, label: cls.toUpperCase(), desc: '', color: '#8b949e' };
+  }
+
+  function engineRank(label) {
+    var cls = label.replace(/[0-9]+$/, '');
+    for (var i = 0; i < ENGINES.length; i++) {
+      if (ENGINES[i].cls === cls) return i;
+    }
+    return ENGINES.length;
+  }
+
+  // The media GT (video engines on their own clock domain since Meteor
+  // Lake) is shown as a card and chart series only while the Engines
+  // panel is open, and only where the daemon reports it.
+  function mediaFreqVisible(arr) { return showEngines && arr.length > 0; }
+
   const gpuMetricDefs = [
     { key: 'utilization',         label: 'Utilization',      unit: '%',   precision: 1, color: '#58a6ff', max: 100 },
     { key: 'frequency_actual',    label: 'Freq (actual)',    unit: 'MHz', precision: 0, color: '#39d2c0' },
@@ -113,6 +150,8 @@
     { key: 'memory_used_gb',      label: 'Memory',           unit: 'GB',  precision: 2, color: '#bc8cff',
       srcKey: 'memory_used', aggregate: true, transform: bytesToGB, subtitleFn: gpuMemSubtitle },
     { key: 'frequency_max',       label: 'Freq (max)',       unit: 'MHz', precision: 0, color: '#8b949e' },
+    { key: 'media_frequency_actual', label: 'Media freq',    unit: 'MHz', precision: 0, color: '#3fb950',
+      showWhen: mediaFreqVisible },
   ].concat(gpuMemClasses.map(function(c) {
     return { key: c.key, srcKey: 'memory_used', labels: { class: c.cls },
              hidden: true, transform: bytesToGB };
@@ -137,6 +176,7 @@
     { key: 'frequency_actual', color: '#39d2c0' },
     { key: 'power',            color: '#d29922' },
     { key: 'temperature',      color: '#f85149' },
+    { key: 'media_frequency_actual', color: '#3fb950', showWhen: mediaFreqVisible },
   ];
 
   // --- Init ---
@@ -183,6 +223,17 @@
         }
       });
 
+      var enginesBtn = document.getElementById('toggle-engines');
+      enginesBtn.addEventListener('click', function() {
+        showEngines = !showEngines;
+        enginesBtn.classList.toggle('on', showEngines);
+        // The panel, the media-clock card and its chart series all
+        // follow the toggle; redraw now rather than on the next sample.
+        renderEngines();
+        updateModuleCards('gpu', gpuMetricDefs);
+        drawChart('gpu-chart', 'gpu', gpuChartSeries);
+      });
+
       // Show sections based on available devices
       if (devices.cpu) {
         document.getElementById('cpu-section').style.display = '';
@@ -202,6 +253,7 @@
       drawAllCharts();
       setupCpuDetails();
       drawPerCore();
+      renderEngines();
 
       document.getElementById('loading').style.display = 'none';
       document.getElementById('app').style.display = '';
@@ -232,6 +284,95 @@
     pushModuleMetrics('npu', npuMetricDefs, sample.metrics && sample.metrics.npu, t);
     pushModuleMetrics('gpu', gpuMetricDefs, sample.metrics && sample.metrics.gpu, t);
     pushPerCoreFromSample(sample, t);
+    pushEnginesFromSample(sample, t);
+  }
+
+  // Per-engine busy lives in the gpu history under "engine_busy/<label>",
+  // one series per engine the daemon reports, so the sparkline code can
+  // draw it like any other metric.
+  function pushEnginesFromSample(sample, t) {
+    var gpu = sample.metrics && sample.metrics.gpu;
+    if (!gpu) return;
+    if (!history.gpu) history.gpu = {};
+    var added = false;
+    for (var i = 0; i < gpu.length; i++) {
+      var m = gpu[i];
+      if (m.name !== 'engine_busy' || !m.labels || !m.labels.engine) continue;
+      var key = ENGINE_PREFIX + m.labels.engine;
+      if (!history.gpu[key]) {
+        history.gpu[key] = [];
+        engineOrder.push(m.labels.engine);
+        added = true;
+      }
+      history.gpu[key].push({ t: t, v: m.value });
+      if (history.gpu[key].length > CHART_LEN) {
+        history.gpu[key] = history.gpu[key].slice(-CHART_LEN);
+      }
+    }
+    if (added) {
+      engineOrder.sort(function(a, b) {
+        var ra = engineRank(a), rb = engineRank(b);
+        if (ra !== rb) return ra - rb;
+        return a < b ? -1 : (a > b ? 1 : 0);
+      });
+    }
+  }
+
+  function lastValue(mod, key) {
+    var arr = history[mod] && history[mod][key];
+    return arr && arr.length > 0 ? arr[arr.length - 1].v : null;
+  }
+
+  // --- GPU engines panel ---
+  function renderEngines() {
+    var panel = document.getElementById('gpu-engines');
+    if (!panel) return;
+    panel.style.display = showEngines ? '' : 'none';
+    var legend = document.getElementById('gpu-legend-media');
+    if (legend) legend.style.display = mediaFreqVisible(history.gpu && history.gpu.media_frequency_actual || []) ? '' : 'none';
+    if (!showEngines) return;
+
+    var note = document.getElementById('gpu-engines-note');
+    var media = lastValue('gpu', 'media_frequency_actual');
+    var render = lastValue('gpu', 'frequency_actual');
+    var parts = [];
+    if (media !== null) parts.push('media GT ' + media.toFixed(0) + ' MHz');
+    if (render !== null) parts.push('render GT ' + render.toFixed(0) + ' MHz');
+    note.textContent = parts.join(' \u00b7 ');
+
+    var table = document.getElementById('gpu-engines-table');
+    if (engineOrder.length === 0) {
+      table.innerHTML = '<tbody><tr><td class="col-desc">no per-engine data: the daemon needs perf access to the GPU PMU</td></tr></tbody>';
+      return;
+    }
+    var html = '<thead><tr>'
+      + '<th class="col-eng">Engine</th>'
+      + '<th class="col-role">Role</th>'
+      + '<th class="col-desc"></th>'
+      + '<th class="col-busy">Busy</th>'
+      + '<th class="col-pct"></th>'
+      + '<th class="col-spark">Trend</th>'
+      + '</tr></thead><tbody>';
+    for (var i = 0; i < engineOrder.length; i++) {
+      var eng = engineOrder[i];
+      var e = engineClass(eng);
+      var v = lastValue('gpu', ENGINE_PREFIX + eng);
+      var pct = v === null ? 0 : Math.max(0, Math.min(100, v));
+      html += '<tr>'
+        + '<td class="col-eng" style="color:' + e.color + '">' + escapeHTML(eng.toUpperCase()) + '</td>'
+        + '<td class="col-role">' + escapeHTML(e.label) + '</td>'
+        + '<td class="col-desc">' + escapeHTML(e.desc) + '</td>'
+        + '<td class="col-busy"><div class="bar"><div class="bar-fill" style="width:' + pct.toFixed(1) + '%;background:' + e.color + '"></div></div></td>'
+        + '<td class="col-pct">' + (v === null ? '\u2014' : pct.toFixed(1) + ' %') + '</td>'
+        + '<td class="col-spark"><canvas id="spark-gpu-' + ENGINE_PREFIX + eng + '"></canvas></td>'
+        + '</tr>';
+    }
+    html += '</tbody>';
+    table.innerHTML = html;
+    for (var k = 0; k < engineOrder.length; k++) {
+      var cls = engineClass(engineOrder[k]);
+      drawSparkline('gpu', { key: ENGINE_PREFIX + engineOrder[k], color: cls.color, max: 100 });
+    }
   }
 
   // Clear all history buffers and reload from the currently-selected tier.
@@ -239,6 +380,7 @@
   async function reloadHistory() {
     // Wipe existing chart history (per-module + per-core + per-type avg).
     for (var k in history) delete history[k];
+    engineOrder = [];
     for (var k2 in coreUtilHistory) delete coreUtilHistory[k2];
     for (var k3 in coreFreqHistory) delete coreFreqHistory[k3];
     typeAvgHistory.performance.length = 0;
@@ -254,6 +396,7 @@
       updateAllCards();
       drawAllCharts();
       drawPerCore();
+      renderEngines();
     } catch (e) {
       console.error('range reload failed:', e);
     }
@@ -357,6 +500,7 @@
         updateAllCards();
         drawAllCharts();
         drawPerCore();
+        renderEngines();
         updateProcesses(sample.processes);
         updateWarnings(sample.warnings);
       } catch (e) { /* ignore parse errors */ }
@@ -409,6 +553,10 @@
       if (def.hidden) continue;
       var arr = history[mod][def.key] || [];
       var last = arr.length > 0 ? arr[arr.length - 1].v : null;
+      if (def.showWhen) {
+        var card = document.getElementById('card-' + mod + '-' + def.key);
+        if (card) card.style.display = def.showWhen(arr) ? '' : 'none';
+      }
       var el = document.getElementById('val-' + mod + '-' + def.key);
       if (el) el.textContent = last !== null ? last.toFixed(def.precision) : '\u2014';
       var sub = document.getElementById('sub-' + mod + '-' + def.key);
@@ -498,6 +646,7 @@
       var s = series[si];
       var arr = history[mod][s.key] || [];
       if (arr.length < 2) continue;
+      if (s.showWhen && !s.showWhen(arr)) continue;
 
       var values = arr.map(function(d) { return d.v; });
       var min = s.min !== undefined ? s.min : Math.min.apply(null, values);

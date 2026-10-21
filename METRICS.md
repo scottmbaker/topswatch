@@ -114,7 +114,17 @@ In the paths below, `<card>` is the discovered DRM card (e.g. `card0`) and
 ### `topswatch_gpu_engine_busy_percent`
 - **Source:** Same `perf_event_open` fds as `topswatch_gpu_utilization_percent`, reported per engine
 - **Unit:** %
-- **Description:** Per-engine busy fraction. One time series per engine, distinguished by the `engine` label (e.g. `rcs0`, `bcs0`, `vcs0`, `vecs0`, or whatever engines the kernel exposes for the detected GPU).
+- **Description:** Per-engine busy fraction. One time series per engine, distinguished by the `engine` label (e.g. `rcs0`, `bcs0`, `vcs0`, `vecs0`, or whatever engines the kernel exposes for the detected GPU). Each hardware video box is one instance: a VDBOX is a `vcs` engine and a VEBOX a `vecs` engine, so a part with two decoders reports two rows (`vcs0` and `vcs1`, or `vcs0` and `vcs2` where the physical slots are sparse). On xe every instance of every class is probed through the PMU, since sysfs names only the classes; on i915 the kernel lists one event per instance. The Panther Lake laptop measured here has one VDBOX and one VEBOX. The busy fraction is the command streamer's, not the fixed-function pipelines inside the box (MFX, HCP, AVP, VDENC): the kernel exposes no counters at that level. The classes are `rcs` render (3D, composition), `ccs` compute (GPGPU, inference), `bcs` copy (blitter), `vcs` video (the fixed-function codec, decode **and** encode) and `vecs` video enhance (scaling, colour conversion, deinterlace). The kernel exposes no counter that separates decode from encode, nor codec, resolution or frame rate; `vcs` busy plus the media GT clock below is the available decoder signal, and the process table's `video` class says who is driving it. The TUI and GUI show these rows in their expanded GPU view (`e`).
+
+### `topswatch_gpu_media_frequency_actual_mhz`
+- **Source:** Xe: `/sys/class/drm/<card>/device/tile*/gt*/freq0/act_freq` of the GT whose `engines/` directory holds only `vcs`/`vecs`
+- **Unit:** MHz
+- **Description:** Current clock of the media GT. Since Meteor Lake the video engines sit on their own GT with its own clock domain, which idles at its floor until a decode, encode or post-processing session starts; `topswatch_gpu_frequency_actual_mhz` is the render GT and does not move for video alone. Absent on single-GT parts and on i915.
+
+### `topswatch_gpu_media_frequency_requested_mhz`
+- **Source:** Xe: `.../freq0/cur_freq` of the same GT
+- **Unit:** MHz
+- **Description:** Clock requested for the media GT by the driver's frequency governor.
 
 ### `topswatch_gpu_memory_used_bytes`
 - **Source:** `/proc/<pid>/fdinfo/<fd>` for every open `/dev/dri/*` client. Memory is the sum of the per-region `drm-total-<region>` keys; the workload class comes from the client's cumulative `drm-cycles-<engine>` counters (`ccs` → compute, `rcs` → graphics, `vcs`/`vecs` → video; `bcs` carries no signal and is ignored). Clients are deduped by `drm-client-id`, since a process that `dup(2)`s its device fd reports the same buffers once per fd.

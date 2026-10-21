@@ -198,11 +198,22 @@ func (c *Client) Stream(ctx context.Context, fn func(collector.Sample)) error {
 	return errors.New("stream closed by daemon")
 }
 
+// SnapshotOptions selects optional parts of the dashboard image.
+type SnapshotOptions struct {
+	// GPUEngines expands the GPU section with one bar per engine and the
+	// media GT frequency (?gpu=engines).
+	GPUEngines bool
+}
+
 // Snapshot fetches the daemon's server-rendered dashboard image
 // (/snapshot.jpg). The GUI viewer displays it directly, so the daemon's
 // renderer is the single source of truth for the dashboard look.
-func (c *Client) Snapshot(ctx context.Context) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/snapshot.jpg", nil)
+func (c *Client) Snapshot(ctx context.Context, opts SnapshotOptions) ([]byte, error) {
+	path := "/snapshot.jpg"
+	if opts.GPUEngines {
+		path += "?gpu=engines"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -218,11 +218,16 @@ func (r *perfReader) initXe(pmuDir string, pmuType uint32, format pmuFormat) err
 		return fmt.Errorf("engine-total-ticks: %w", err)
 	}
 
+	// sysfs names the engine classes present on each GT but not their
+	// instances: a part with two VDBOXes has two vcs engines (instance
+	// numbers may be sparse, e.g. vcs0 and vcs2, as the physical slots
+	// are). The PMU rejects a (class, instance, gt) it does not have, so
+	// every instance is probed and each one that opens becomes a row,
+	// labelled like i915 does (vcs0, vcs2, ...).
 	type engineSlot struct {
-		label    string
-		classID  uint64
-		instance uint64
-		gtID     uint64
+		class   string
+		classID uint64
+		gtID    uint64
 	}
 	var slots []engineSlot
 	gtDirs, _ := filepath.Glob("/sys/class/drm/card*/device/tile*/gt*/engines")
@@ -246,11 +251,7 @@ func (r *perfReader) initXe(pmuDir string, pmuType uint32, format pmuFormat) err
 			if !ok {
 				continue
 			}
-			slots = append(slots, engineSlot{
-				label:   e.Name() + "0",
-				classID: classID,
-				gtID:    gtID,
-			})
+			slots = append(slots, engineSlot{class: e.Name(), classID: classID, gtID: gtID})
 		}
 	}
 	if len(slots) == 0 {
@@ -259,29 +260,35 @@ func (r *perfReader) initXe(pmuDir string, pmuType uint32, format pmuFormat) err
 
 	attrSize := uint32(unsafe.Sizeof(unix.PerfEventAttr{}))
 	for _, sl := range slots {
-		extra := setBits(sl.classID, classBR) | setBits(sl.instance, instBR) | setBits(sl.gtID, gtBR)
-		actCfg := activeBase | extra
-		totCfg := totalBase | extra
+		for inst := uint64(0); inst < xeMaxEngineInstances; inst++ {
+			extra := setBits(sl.classID, classBR) | setBits(inst, instBR) | setBits(sl.gtID, gtBR)
+			actCfg := activeBase | extra
+			totCfg := totalBase | extra
 
-		actAttr := unix.PerfEventAttr{Type: pmuType, Size: attrSize, Config: actCfg}
-		actFd, err := unix.PerfEventOpen(&actAttr, -1, r.cpu, -1, unix.PERF_FLAG_FD_CLOEXEC)
-		if err != nil {
-			continue // engine not present on this SKU
+			actAttr := unix.PerfEventAttr{Type: pmuType, Size: attrSize, Config: actCfg}
+			actFd, err := unix.PerfEventOpen(&actAttr, -1, r.cpu, -1, unix.PERF_FLAG_FD_CLOEXEC)
+			if err != nil {
+				continue // no such instance on this SKU
+			}
+			totAttr := unix.PerfEventAttr{Type: pmuType, Size: attrSize, Config: totCfg}
+			totFd, err := unix.PerfEventOpen(&totAttr, -1, r.cpu, -1, unix.PERF_FLAG_FD_CLOEXEC)
+			if err != nil {
+				_ = unix.Close(actFd)
+				continue
+			}
+			r.counters = append(r.counters, &engineCounter{
+				label:    fmt.Sprintf("%s%d", sl.class, inst),
+				activeFd: actFd,
+				totalFd:  totFd,
+			})
 		}
-		totAttr := unix.PerfEventAttr{Type: pmuType, Size: attrSize, Config: totCfg}
-		totFd, err := unix.PerfEventOpen(&totAttr, -1, r.cpu, -1, unix.PERF_FLAG_FD_CLOEXEC)
-		if err != nil {
-			_ = unix.Close(actFd)
-			continue
-		}
-		r.counters = append(r.counters, &engineCounter{
-			label:    sl.label,
-			activeFd: actFd,
-			totalFd:  totFd,
-		})
 	}
 	return nil
 }
+
+// xeMaxEngineInstances bounds the instance probe. Xe HPC parts have up to
+// nine copy engines and eight video engines; nothing shipped has more.
+const xeMaxEngineInstances = 16
 
 // --- i915 driver ---
 
