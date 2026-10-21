@@ -95,3 +95,49 @@ func TestMemoryBar(t *testing.T) {
 		t.Fatalf("gpu clamp: %+v", b)
 	}
 }
+
+func TestEngineHelpers(t *testing.T) {
+	ms := []module.Metric{
+		{Name: "engine_busy", Value: 10, Labels: map[string]string{"engine": "vecs0"}},
+		{Name: "engine_busy", Value: 20, Labels: map[string]string{"engine": "vcs1"}},
+		{Name: "engine_busy", Value: 30, Labels: map[string]string{"engine": "rcs0"}},
+		{Name: "engine_busy", Value: 40, Labels: map[string]string{"engine": "vcs0"}},
+		{Name: "engine_busy", Value: 50, Labels: map[string]string{"engine": "xcs0"}},
+		{Name: "utilization", Value: 60},
+	}
+	got := EngineLabels(ms)
+	want := []string{"rcs0", "vcs0", "vcs1", "vecs0", "xcs0"}
+	if len(got) != len(want) {
+		t.Fatalf("EngineLabels = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("EngineLabels = %v, want %v", got, want)
+		}
+	}
+	if v, ok := EngineValue(ms, "vcs1"); !ok || v != 20 {
+		t.Fatalf("EngineValue(vcs1) = %v %v", v, ok)
+	}
+	if _, ok := EngineValue(ms, "bcs0"); ok {
+		t.Fatal("EngineValue found an absent engine")
+	}
+	if e := EngineClass("vecs0"); e.Label != "Video enhance" {
+		t.Fatalf("EngineClass(vecs0) = %+v", e)
+	}
+	// An engine class the table does not know still renders.
+	if e := EngineClass("xcs0"); e.Label != "XCS" || e.Color == "" {
+		t.Fatalf("EngineClass(xcs0) = %+v", e)
+	}
+	for _, e := range Engines {
+		if e.Class == "" || e.Label == "" || len(e.Color) != 7 {
+			t.Errorf("incomplete engine %+v", e)
+		}
+	}
+	for mod, defs := range Detail {
+		for _, d := range defs {
+			if d.Key == "" || d.Label == "" || d.Short == "" || len(d.Color) != 7 {
+				t.Errorf("%s detail %+v incomplete", mod, d)
+			}
+		}
+	}
+}

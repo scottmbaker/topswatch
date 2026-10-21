@@ -29,6 +29,8 @@ GPU
   Freq (RPn min):  300 MHz
   Power:           11.29 W
   Temperature:     49.19 C
+  Media freq (act): 670.5 MHz
+  Media freq (req): 770.5 MHz
 
 NPU
   Device:          Intel NPU 5720 (8086:b03e)

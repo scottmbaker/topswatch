@@ -238,6 +238,7 @@ header h1 span {
 .legend-freq::before { background: var(--cyan); }
 .legend-power::before { background: var(--orange); }
 .legend-temp::before { background: var(--red); }
+.legend-media::before { background: #3fb950; }
 
 
 .section-header {
@@ -352,6 +353,15 @@ header h1 span {
 .proc-table tr.proc-empty {
   visibility: hidden;
 }
+
+/* GPU engines panel: one row per engine, same bar as the process table
+   but filled in the engine's own colour, plus a short trend. */
+.engine-table .col-eng   { width: 56px; font-weight: 600; }
+.engine-table .col-role  { width: 120px; }
+.engine-table .col-desc  { color: var(--text-dim); font-size: 11px; }
+.engine-table .col-spark { width: 160px; }
+.engine-table .col-spark canvas { display: block; width: 100%; height: 22px; }
+.engine-table .col-pct   { width: 56px; text-align: right; }
 .proc-list {
   font-size: 11px;
   color: var(--text);

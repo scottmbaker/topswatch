@@ -32,6 +32,9 @@ type Options struct {
 	// Record is the length of a timed measurement started with t
 	// (default 5m).
 	Record time.Duration
+	// Engines opens the expanded GPU view (one row per engine, media GT
+	// frequency) at start; e toggles it.
+	Engines bool
 }
 
 // Run starts the TUI and blocks until the user quits.
@@ -83,6 +86,7 @@ type model struct {
 	session       *energy.Session // nil unless Options.Energy
 	mem           metricdef.MemoryBar
 	hasMem        bool
+	engines       bool
 
 	// stream mode
 	samples chan collector.Sample
@@ -106,6 +110,7 @@ func newModel(c *client.Client, opts Options) *model {
 		store:   newStore(),
 		ranges:  []string{collector.TierShort},
 		charts:  newChartCache(),
+		engines: opts.Engines,
 	}
 }
 
@@ -251,6 +256,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "p":
 			m.paused = !m.paused
 			return m, nil
+		case "e":
+			m.engines = !m.engines
+			return m, nil
 		}
 		if m.session != nil {
 			switch msg.String() {
@@ -379,10 +387,16 @@ func (m *model) View() string {
 		recordFor: m.opts.Record,
 		mem:       m.mem,
 		hasMem:    m.hasMem,
+		engines:   m.engines,
 	}
 	extra := f.energy.height()
 	if m.hasMem {
 		extra++ // the memory bar line under the CPU cards
+	}
+	if m.engines {
+		if _, ok := m.devices["gpu"]; ok {
+			extra += enginesHeight(len(m.store.engines()))
+		}
 	}
 	return render(f, computeLayout(m.width, m.height, len(presentModules(m.devices)), extra))
 }

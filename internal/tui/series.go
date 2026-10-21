@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"time"
 
 	"github.com/scottmbaker/topswatch/internal/collector"
@@ -34,8 +35,9 @@ func (s *store) reset() {
 	s.gen++
 }
 
-// push appends one sample's headline metrics, using the shared
-// definitions so the values match the snapshot and web dashboard.
+// push appends one sample's headline and detail metrics, using the shared
+// definitions so the values match the snapshot and web dashboard. GPU
+// engines are stored one series each under engineKey.
 func (s *store) push(t time.Time, metrics map[string][]module.Metric) {
 	for _, mod := range metricdef.Order {
 		ms, ok := metrics[mod]
@@ -49,8 +51,42 @@ func (s *store) push(t time.Time, metrics map[string][]module.Metric) {
 			}
 			s.append(mod, d.Key, point{t, v})
 		}
+		for _, d := range metricdef.Detail[mod] {
+			v, ok := metricdef.Value(ms, d)
+			if !ok {
+				continue
+			}
+			s.append(mod, d.Key, point{t, v})
+		}
+		if mod == "gpu" {
+			for _, eng := range metricdef.EngineLabels(ms) {
+				v, _ := metricdef.EngineValue(ms, eng)
+				s.append(mod, engineKey(eng), point{t, v})
+			}
+		}
 	}
 }
+
+const enginePrefix = "engine_busy/"
+
+// engineKey is the store key of one GPU engine's busy series.
+func engineKey(label string) string { return enginePrefix + label }
+
+// engines returns the GPU engine labels the store has seen, in display
+// order.
+func (s *store) engines() []string {
+	var out []string
+	for k := range s.series["gpu"] {
+		if strings.HasPrefix(k, enginePrefix) {
+			out = append(out, strings.TrimPrefix(k, enginePrefix))
+		}
+	}
+	metricdef.SortEngines(out)
+	return out
+}
+
+// has reports whether (mod, key) has any points.
+func (s *store) has(mod, key string) bool { return len(s.get(mod, key)) > 0 }
 
 func (s *store) append(mod, key string, p point) {
 	s.gen++

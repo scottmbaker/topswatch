@@ -91,11 +91,55 @@ func itoa(n int) string {
 	return string(b)
 }
 
+const enginesGolden = "testdata/snapshot_engines_golden.png"
+
+// TestRenderSnapshotEnginesGolden pins the expanded GPU view
+// (?gpu=engines): one bar per engine and the media frequency card.
+func TestRenderSnapshotEnginesGolden(t *testing.T) {
+	snapNow = func() time.Time { return testfixture.Epoch.Add(120 * time.Second) }
+	t.Cleanup(func() { snapNow = time.Now })
+
+	plain := renderSnapshot(testfixture.Devices(), testfixture.History(120))
+	got := renderSnapshotOpts(testfixture.Devices(), testfixture.History(120), SnapshotOptions{GPUEngines: true})
+	if want := plain.Bounds().Dy() + enginesPanelH(5); got.Bounds().Dy() != want {
+		t.Fatalf("expanded height %d, want %d (plain %d + panel)", got.Bounds().Dy(), want, plain.Bounds().Dy())
+	}
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, got); err != nil {
+		t.Fatal(err)
+	}
+	if *update {
+		if err := os.WriteFile(enginesGolden, buf.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("wrote %s", enginesGolden)
+		return
+	}
+	wantBytes, err := os.ReadFile(enginesGolden)
+	if err != nil {
+		t.Fatalf("missing golden (run with -update): %v", err)
+	}
+	want, err := png.Decode(bytes.NewReader(wantBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := imageDiff(got, want); diff != "" {
+		out := filepath.Join(t.TempDir(), "snapshot_engines_got.png")
+		_ = os.WriteFile(out, buf.Bytes(), 0o644)
+		t.Fatalf("engines snapshot differs from golden: %s\nactual written to %s", diff, out)
+	}
+}
+
 // TestSnapshotHandlesEmptyHistory guards against panics on the first
 // request after startup, before any sample exists.
 func TestSnapshotHandlesEmptyHistory(t *testing.T) {
 	img := renderSnapshot(testfixture.Devices(), nil)
 	if img.Bounds().Dx() != snapW {
 		t.Fatalf("width %d, want %d", img.Bounds().Dx(), snapW)
+	}
+	img = renderSnapshotOpts(testfixture.Devices(), nil, SnapshotOptions{GPUEngines: true})
+	if img.Bounds().Dx() != snapW {
+		t.Fatalf("expanded width %d, want %d", img.Bounds().Dx(), snapW)
 	}
 }

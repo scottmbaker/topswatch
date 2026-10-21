@@ -26,6 +26,7 @@
       </select>
       <button id="toggle-procs" class="hdr-toggle" type="button" title="Show/hide process lists">Procs</button>
       <button id="toggle-cores" class="hdr-toggle" type="button" title="Show/hide per-core stats">Cores</button>
+      <button id="toggle-engines" class="hdr-toggle" type="button" title="Show/hide GPU engines (render, compute, copy, video, video enhance) and the media GT clock">Engines</button>
       <span class="gen-badge" id="gen-badge"></span>
     </div>
   </header>
@@ -91,6 +92,10 @@
   <div id="gpu-section" style="display:none">
     <div class="section-header">GPU<span class="warn-badges" id="gpu-badges"></span></div>
     <div class="cards" id="gpu-cards"></div>
+    <div id="gpu-engines" class="proc-panel" style="display:none">
+      <div class="proc-title">GPU engines<span class="proc-note" id="gpu-engines-note"></span></div>
+      <table class="proc-table engine-table" id="gpu-engines-table"></table>
+    </div>
     <div id="gpu-procs" class="proc-panel" style="display:none">
       <div class="proc-title">Top GPU processes<span class="proc-note" id="gpu-procs-note"></span></div>
       <table class="proc-table" id="gpu-procs-table"></table>
@@ -103,6 +108,7 @@
           <span class="legend-freq">Frequency</span>
           <span class="legend-power">Power</span>
           <span class="legend-temp">Temperature</span>
+          <span class="legend-media" id="gpu-legend-media" style="display:none">Media freq</span>
         </div>
       </div>
       <canvas id="gpu-chart"></canvas>

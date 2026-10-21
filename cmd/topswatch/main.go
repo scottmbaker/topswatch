@@ -39,12 +39,13 @@ func main() {
 	jsonOut := flag.Bool("json", false, "with --measure: print the report as JSON")
 	recordFor := flag.Duration("record", 0, "with --tui --energy: length of the timed recording started with t (default 5m)")
 	measureFor := flag.Duration("for", 0, "with --measure and no command: measure for this long, e.g. --for 5m")
+	engines := flag.Bool("engines", false, "with --tui: start with the expanded GPU view (one row per engine, media GT frequency); e toggles it")
 	flag.Parse()
 
 	// Viewer mode needs no hardware access or config: it is a client of a
 	// daemon that is already running (locally by default).
 	if *tuiMode {
-		if err := tui.Run(tui.Options{Addr: *connect, Refresh: *refresh, Energy: *energyPanel, Baseline: *baseline, Record: *recordFor}); err != nil {
+		if err := tui.Run(tui.Options{Addr: *connect, Refresh: *refresh, Energy: *energyPanel, Baseline: *baseline, Record: *recordFor, Engines: *engines}); err != nil {
 			log.Fatalf("[tui] %v", err)
 		}
 		return

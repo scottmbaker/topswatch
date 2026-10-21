@@ -53,3 +53,25 @@ func TestRangeCycleResetsStore(t *testing.T) {
 	m.Update(historyMsg{tier: "24h"})
 	m.cancel()
 }
+
+func TestEnginesKeyToggles(t *testing.T) {
+	c, _ := client.New("localhost:1")
+	m := newModel(c, Options{})
+	if m.engines {
+		t.Fatal("engines view on by default")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if !m.engines {
+		t.Fatal("e did not open the engines view")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if m.engines {
+		t.Fatal("e did not close the engines view")
+	}
+	m2 := newModel(c, Options{Engines: true})
+	if !m2.engines {
+		t.Fatal("--engines ignored")
+	}
+	m.cancel()
+	m2.cancel()
+}

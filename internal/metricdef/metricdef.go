@@ -8,7 +8,12 @@
 // same values; folding that in is a separate, web-facing change.
 package metricdef
 
-import "github.com/scottmbaker/topswatch/internal/module"
+import (
+	"sort"
+	"strings"
+
+	"github.com/scottmbaker/topswatch/internal/module"
+)
 
 // Def describes the presentation of one metric within a module.
 type Def struct {
@@ -83,6 +88,100 @@ var Cards = map[string][]Def{
 		{Key: "power", Label: "Power", Short: "POWER", Unit: "W", Color: ColorOrange, Precision: 2, Chart: true},
 		{Key: "memory_used", Label: "Memory", Short: "MEM", Unit: "GB", Color: ColorPurple, Precision: 2, Aggregate: true, Transform: bytesToGB},
 	},
+}
+
+// Detail lists, per module, the metrics shown only in a module's expanded
+// view. They join the cards and the chart while the view is open. The GPU
+// media GT (the video decode/encode and enhancement engines on their own
+// power domain since Meteor Lake) clocks independently of the render GT,
+// so its frequency is the one number that says "the decoder is awake".
+var Detail = map[string][]Def{
+	"gpu": {
+		{Key: "media_frequency_actual", Label: "Media freq (actual)", Short: "MEDIA FREQ", Unit: "MHz", Color: ColorGreen, Precision: 0, Chart: true},
+	},
+}
+
+// Engine describes one GPU engine class for the expanded GPU view. Class
+// is the kernel's short name, which both drivers use as the prefix of the
+// engine label (rcs0, vcs1, ...).
+type Engine struct {
+	Class string
+	Label string
+	Desc  string
+	Color string
+}
+
+// Engines lists the engine classes in display order. Video decode and
+// encode both run on the VCS engines: the kernel exposes no counter that
+// separates them, nor anything about codec, resolution or frame rate.
+var Engines = []Engine{
+	{Class: "rcs", Label: "Render", Desc: "3D, display composition", Color: ColorAccent},
+	{Class: "ccs", Label: "Compute", Desc: "GPGPU, AI inference", Color: ColorPurple},
+	{Class: "bcs", Label: "Copy", Desc: "blitter, buffer transfers", Color: ColorDim},
+	{Class: "vcs", Label: "Video", Desc: "decode and encode", Color: ColorOrange},
+	{Class: "vecs", Label: "Video enhance", Desc: "scaling, VPP, deinterlace", Color: ColorCyan},
+}
+
+// EngineBusy is the per-engine busy metric; each instance carries an
+// "engine" label (rcs0, bcs0, vcs0, vecs0, ccs0, or whatever the kernel
+// exposes for the detected GPU).
+var EngineBusy = Def{Key: "engine_busy", Label: "Engine busy", Short: "BUSY", Unit: "%", Precision: 1, Max: 100}
+
+// EngineClass returns the class entry for an engine label such as "vcs1".
+// Unknown classes get a generic entry so a new engine still shows up.
+func EngineClass(label string) Engine {
+	class := strings.TrimRight(label, "0123456789")
+	for _, e := range Engines {
+		if e.Class == class {
+			return e
+		}
+	}
+	return Engine{Class: class, Label: strings.ToUpper(class), Color: ColorDim}
+}
+
+// EngineLabels returns the engine labels present in a GPU metric list,
+// in Engines order (then by instance), so the view is stable from sample
+// to sample regardless of map iteration order in the collector.
+func EngineLabels(metrics []module.Metric) []string {
+	var out []string
+	for _, m := range metrics {
+		if m.Name == EngineBusy.Key && m.Labels["engine"] != "" {
+			out = append(out, m.Labels["engine"])
+		}
+	}
+	SortEngines(out)
+	return out
+}
+
+// SortEngines orders engine labels by class display order, then by name.
+func SortEngines(labels []string) {
+	rank := func(l string) int {
+		class := strings.TrimRight(l, "0123456789")
+		for i, e := range Engines {
+			if e.Class == class {
+				return i
+			}
+		}
+		return len(Engines)
+	}
+	sort.Slice(labels, func(i, j int) bool {
+		ri, rj := rank(labels[i]), rank(labels[j])
+		if ri != rj {
+			return ri < rj
+		}
+		return labels[i] < labels[j]
+	})
+}
+
+// EngineValue returns the busy percentage of one engine in a GPU metric
+// list.
+func EngineValue(metrics []module.Metric, label string) (float64, bool) {
+	for _, m := range metrics {
+		if m.Name == EngineBusy.Key && m.Labels["engine"] == label {
+			return m.Value, true
+		}
+	}
+	return 0, false
 }
 
 // Memory-bar inputs, in GB. The viewers draw one stacked bar for system

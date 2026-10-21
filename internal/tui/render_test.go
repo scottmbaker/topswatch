@@ -191,3 +191,53 @@ func TestChartCacheInvalidation(t *testing.T) {
 		t.Fatal("nil cache should build")
 	}
 }
+
+func TestRenderEngines(t *testing.T) {
+	st := fixtureStore(30)
+	engs := st.engines()
+	want := []string{"rcs0", "ccs0", "bcs0", "vcs0", "vecs0"}
+	if strings.Join(engs, ",") != strings.Join(want, ",") {
+		t.Fatalf("engines = %v, want %v", engs, want)
+	}
+	f := frame{
+		addr: "x", now: testfixture.Epoch, tier: "5min", mode: "stream",
+		devices: testfixture.Devices(), store: st, engines: true,
+	}
+	for _, size := range [][2]int{{120, 50}, {80, 30}, {50, 24}} {
+		w, h := size[0], size[1]
+		out := render(f, computeLayout(w, h, 3, enginesHeight(len(engs))))
+		lines := strings.Split(out, "\n")
+		if len(lines) > h {
+			t.Errorf("%dx%d: rendered %d lines, exceeds height", w, h, len(lines))
+		}
+		for i, ln := range lines {
+			if lw := visibleWidth(ln); lw > w {
+				t.Errorf("%dx%d: line %d is %d cells wide: %q", w, h, i, lw, ln)
+			}
+		}
+		for _, want := range []string{"ENGINES", "RCS0", "Video enhance", "VECS0", "Copy"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%dx%d: output missing %q", w, h, want)
+			}
+		}
+		// Five cards in 50 columns are 9 cells each; the label truncates.
+		if w >= 80 && !strings.Contains(out, "MEDIA FREQ") {
+			t.Errorf("%dx%d: output missing the media frequency card", w, h)
+		}
+	}
+	// Collapsed: no engine rows, no detail card.
+	f.engines = false
+	out := render(f, computeLayout(120, 50, 3, 0))
+	if strings.Contains(out, "ENGINES") || strings.Contains(out, "MEDIA FREQ") {
+		t.Fatal("collapsed view still shows the engines panel")
+	}
+	// Expanded with no engine data: the note takes the budgeted lines.
+	f.engines, f.store = true, newStore()
+	out = render(f, computeLayout(100, 40, 3, enginesHeight(0)))
+	if !strings.Contains(out, "no per-engine data") {
+		t.Fatal("expected the no-data note")
+	}
+	if n := len(strings.Split(out, "\n")); n > 40 {
+		t.Fatalf("no-data view is %d lines", n)
+	}
+}
