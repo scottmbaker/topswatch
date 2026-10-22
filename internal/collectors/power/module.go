@@ -177,7 +177,7 @@ func (m *Module) discoverRAPL() {
 	// energy counter; fall back to it so the GPU row of the energy
 	// breakdown does not silently become part of "SoC other".
 	if !m.hasDomain(DomainUncore) {
-		if d, err := socpmt.Open(); err == nil {
+		if d, err := socpmt.OpenUnder(filepath.Join(m.sysRoot, "class/intel_pmt")); err == nil {
 			m.zones = append(m.zones, &zone{domain: DomainUncore, pmt: d})
 			log.Printf("[power] uncore energy from PMT GT counter (%s); no RAPL uncore zone", d.Generation())
 		}

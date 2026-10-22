@@ -54,6 +54,12 @@ func Open() (*Device, error) {
 	return openUnder(basePath)
 }
 
+// OpenUnder is Open against a sysfs tree rooted elsewhere (tests): base
+// is the directory that plays /sys/class/intel_pmt.
+func OpenUnder(base string) (*Device, error) {
+	return openUnder(base)
+}
+
 func openUnder(base string) (*Device, error) {
 	dirs, _ := filepath.Glob(filepath.Join(base, "telem*"))
 	for _, d := range dirs {
