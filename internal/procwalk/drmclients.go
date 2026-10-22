@@ -48,31 +48,36 @@ func drmClientPIDs(root string) (map[int]bool, bool) {
 //
 //	    command  tgid dev master a   uid      magic ... name  id
 //	gnome-shell  2232   0   n    y  1001          1 ... <unset>  11
+//	Web Content 123456   0   n    y  1001          2 ... <unset>  12
 //
-// The command is a right-aligned fixed-width column that may contain
-// spaces ("Web Content"), so the tgid is taken as the last field that
-// ends where the header's "tgid" ends rather than by field number.
+// The command is a right-aligned column of fixed width (%20s, and a
+// process name is at most 15 characters) that may contain spaces, so
+// the tgid is the first field after where the header's "command" ends.
+// The tgid column itself is not fixed width: the kernel prints it with
+// %5d, and a six- or seven-digit PID, which is most of them once a
+// machine with the default pid_max has been up for a while, runs past
+// it, so it cannot be cut at the header's column.
 func parseDRMClients(b []byte) []int {
 	lines := strings.Split(string(b), "\n")
 	if len(lines) == 0 {
 		return nil
 	}
 	hdr := lines[0]
-	col := strings.Index(hdr, "tgid")
+	col := strings.Index(hdr, "command")
 	if col < 0 {
 		return nil
 	}
-	end := col + len("tgid")
+	cmdEnd := col + len("command")
 	var out []int
 	for _, line := range lines[1:] {
-		if len(line) < end {
+		if len(line) <= cmdEnd {
 			continue
 		}
-		fields := strings.Fields(line[:end])
+		fields := strings.Fields(line[cmdEnd:])
 		if len(fields) == 0 {
 			continue
 		}
-		pid, err := strconv.Atoi(fields[len(fields)-1])
+		pid, err := strconv.Atoi(fields[0])
 		if err != nil || pid <= 0 {
 			continue
 		}

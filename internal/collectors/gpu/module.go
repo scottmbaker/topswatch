@@ -41,9 +41,10 @@ type Module struct {
 	// Engine events are held only while the GPU works (see gate.go);
 	// idle is the GT's C6 residency, nil where the driver has none, in
 	// which case the events stay open as they always did.
-	idle       *gtIdle
-	gate       *engineGate
-	gateLogged bool
+	idle         *gtIdle
+	gate         *engineGate
+	gateLogged   bool
+	reopenLogged bool
 }
 
 func New() *Module {
@@ -234,7 +235,12 @@ func (m *Module) collectEngineBusy() map[string]float64 {
 		busy = nil
 	case !open && want:
 		if err := m.perf.open(); err != nil {
-			log.Printf("[gpu] cannot reopen engine counters: %v", err)
+			if !m.reopenLogged {
+				log.Printf("[gpu] cannot reopen engine counters: %v (engines report 0%% until they open)", err)
+				m.reopenLogged = true
+			}
+		} else {
+			m.reopenLogged = false
 		}
 	}
 	if busy == nil {

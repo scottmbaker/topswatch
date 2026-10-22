@@ -11,11 +11,16 @@ const clientsSample = `             command  tgid dev master a   uid      magic 
          gnome-shell  2232   0   n    y  1001          1                                                          <unset>                   11
          Web Content 31337   0   n    y  1001          2                                                          <unset>                   12
              python3 68354 128   n    n  1000          0                                                          <unset>                   55
+                 ovn 123456   0   n    y  1000          0                                                          <unset>                   56
+         Web Content 1234567   0   n    y  1001          3                                                          <unset>                   57
 `
 
 func TestParseDRMClients(t *testing.T) {
+	// The kernel prints the tgid with %5d: the six- and seven-digit rows
+	// are wider than the header's column, as they are on any machine
+	// that has been up long enough to pass PID 99999.
 	got := parseDRMClients([]byte(clientsSample))
-	want := []int{707, 2232, 31337, 68354}
+	want := []int{707, 2232, 31337, 68354, 123456, 1234567}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -52,7 +57,7 @@ func TestDRMClientPIDs(t *testing.T) {
 	if !ok {
 		t.Fatal("expected a readable list")
 	}
-	if len(pids) != 5 || !pids[707] || !pids[4242] || !pids[31337] {
+	if len(pids) != 7 || !pids[707] || !pids[4242] || !pids[31337] || !pids[1234567] {
 		t.Fatalf("pids = %v", pids)
 	}
 	if _, ok := drmClientPIDs(filepath.Join(root, "missing")); ok {
