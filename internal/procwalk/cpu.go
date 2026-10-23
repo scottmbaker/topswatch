@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/scottmbaker/topswatch/internal/sysfile"
 )
 
 // ProcessCPU is one process's CPU consumption since the previous sample.
@@ -58,8 +60,8 @@ var pageSize = uint64(os.Getpagesize())
 //
 // After "comm) " the index of utime is field 14 - 2 = 12 (0-indexed: 11),
 // stime is 12, and rss is 21.
-func readProcStat(pid int) (jiffies uint64, rssPages uint64, ok bool) {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+func readProcStat(pid int, buf []byte) (jiffies uint64, rssPages uint64, ok bool) {
+	b, err := sysfile.ReadInto(fmt.Sprintf("/proc/%d/stat", pid), buf)
 	if err != nil {
 		return 0, 0, false
 	}
@@ -93,9 +95,10 @@ func readProcStat(pid int) (jiffies uint64, rssPages uint64, ok bool) {
 func (t *Tracker) sampleCPUProcesses(now time.Time, maxResults int, pids []int) []ProcessCPU {
 	var out []ProcessCPU
 	newState := make(map[int]*cpuPidState, len(t.cpuState))
+	buf := make([]byte, procBuf)
 
 	for _, pid := range pids {
-		jiffies, rssPages, ok := readProcStat(pid)
+		jiffies, rssPages, ok := readProcStat(pid, buf)
 		if !ok {
 			continue
 		}

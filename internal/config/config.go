@@ -20,6 +20,12 @@ type CollectorConfig struct {
 	// list is refreshed. Between walks only known clients are re-read.
 	// 0 walks on every sample (the pre-rescan behaviour).
 	ProcessRescan time.Duration `yaml:"process_rescan"`
+	// CPUs confines the daemon to these CPUs: a core type ("low_power",
+	// "efficient", "performance") or a list ("12-15"). Empty leaves the
+	// daemon wherever the scheduler puts it. Pinning to the low-power
+	// cores keeps the daemon's once-a-second wake-ups off the cores the
+	// watched workload runs on.
+	CPUs string `yaml:"cpus,omitempty"`
 }
 
 type CPUCollectorConfig struct {

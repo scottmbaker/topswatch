@@ -3,14 +3,35 @@ package gpu
 import (
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
+
+	"github.com/scottmbaker/topswatch/internal/sysfile"
 )
 
 // freqReader reads GT frequency attributes from the Xe driver sysfs.
 // Path: /sys/class/drm/card*/device/tile*/gt*/freq0/
+// Each attribute is opened on first use and then held (see sysfile).
 type freqReader struct {
 	freqDir string // path to freq0 directory
+	attrs   heldAttrs
+}
+
+// heldAttrs caches attribute files by name. A name whose file does not
+// exist is remembered as nil so it is not retried every sample.
+type heldAttrs map[string]*sysfile.File
+
+func (h heldAttrs) get(dir, attr string) *sysfile.File {
+	f, ok := h[attr]
+	if !ok {
+		f, _ = sysfile.Open(filepath.Join(dir, attr))
+		h[attr] = f
+	}
+	return f
+}
+
+func (h heldAttrs) close() {
+	for _, f := range h {
+		f.Close() //nolint:errcheck
+	}
 }
 
 // discoverFreqDir finds the GT frequency sysfs directory.
@@ -21,14 +42,14 @@ func discoverFreqDir(deviceDir string) *freqReader {
 	tileGlob := filepath.Join(deviceDir, "tile*", "gt*", "freq0")
 	matches, _ := filepath.Glob(tileGlob)
 	if len(matches) > 0 {
-		return &freqReader{freqDir: matches[0]}
+		return &freqReader{freqDir: matches[0], attrs: heldAttrs{}}
 	}
 
 	// Try alternate Xe path without tile: gt/gt0/freq0
 	altGlob := filepath.Join(deviceDir, "gt", "gt*", "freq0")
 	matches, _ = filepath.Glob(altGlob)
 	if len(matches) > 0 {
-		return &freqReader{freqDir: matches[0]}
+		return &freqReader{freqDir: matches[0], attrs: heldAttrs{}}
 	}
 
 	return nil
@@ -52,7 +73,7 @@ func discoverMediaFreqDir(deviceDir string) *freqReader {
 			}
 			freqDir := filepath.Join(gt, "freq0")
 			if _, err := os.Stat(filepath.Join(freqDir, "act_freq")); err == nil {
-				return &freqReader{freqDir: freqDir}
+				return &freqReader{freqDir: freqDir, attrs: heldAttrs{}}
 			}
 		}
 	}
@@ -81,12 +102,20 @@ func isMediaGT(gtDir string) bool {
 // readFreqMHz reads a frequency attribute file and returns the value in MHz.
 // The Xe driver writes plain integers (MHz) to these files.
 func (f *freqReader) readFreqMHz(attr string) (float64, bool) {
-	path := filepath.Join(f.freqDir, attr)
-	data, err := os.ReadFile(path)
-	if err != nil {
+	return readHeldFloat(f.attrs.get(f.freqDir, attr))
+}
+
+func (f *freqReader) close() {
+	if f != nil {
+		f.attrs.close()
+	}
+}
+
+func readHeldFloat(f *sysfile.File) (float64, bool) {
+	if f == nil {
 		return 0, false
 	}
-	v, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
+	v, err := f.Float()
 	if err != nil {
 		return 0, false
 	}
@@ -97,26 +126,24 @@ func (f *freqReader) readFreqMHz(attr string) (float64, bool) {
 // Path: /sys/class/drm/card*/gt_act_freq_mhz etc.
 type i915FreqReader struct {
 	cardDir string // e.g. /sys/class/drm/card0
+	attrs   heldAttrs
 }
 
 func discoverI915Freq(cardName string) *i915FreqReader {
 	cardDir := filepath.Join(drmBasePath, cardName)
 	// Check if i915 frequency files exist
 	if _, err := os.Stat(filepath.Join(cardDir, "gt_act_freq_mhz")); err == nil {
-		return &i915FreqReader{cardDir: cardDir}
+		return &i915FreqReader{cardDir: cardDir, attrs: heldAttrs{}}
 	}
 	return nil
 }
 
 func (f *i915FreqReader) readFreqMHz(attr string) (float64, bool) {
-	path := filepath.Join(f.cardDir, attr)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, false
+	return readHeldFloat(f.attrs.get(f.cardDir, attr))
+}
+
+func (f *i915FreqReader) close() {
+	if f != nil {
+		f.attrs.close()
 	}
-	v, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
-	if err != nil {
-		return 0, false
-	}
-	return v, true
 }

@@ -16,9 +16,10 @@ package socpmt
 import (
 	"encoding/binary"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/scottmbaker/topswatch/internal/sysfile"
 )
 
 const basePath = "/sys/class/intel_pmt"
@@ -38,9 +39,11 @@ var layouts = map[string]layout{
 	"0x3086000":  {gen: "Panther Lake", gtEnergy: 0x668},
 }
 
-// Device is an open SoC aggregator region.
+// Device is an open SoC aggregator region. The telem file is held open
+// and the counter is read in place each sample.
 type Device struct {
 	path   string
+	f      *sysfile.File
 	guid   string
 	layout layout
 }
@@ -51,20 +54,32 @@ func Open() (*Device, error) {
 	return openUnder(basePath)
 }
 
+// OpenUnder is Open against a sysfs tree rooted elsewhere (tests): base
+// is the directory that plays /sys/class/intel_pmt.
+func OpenUnder(base string) (*Device, error) {
+	return openUnder(base)
+}
+
 func openUnder(base string) (*Device, error) {
 	dirs, _ := filepath.Glob(filepath.Join(base, "telem*"))
 	for _, d := range dirs {
-		g, err := os.ReadFile(filepath.Join(d, "guid"))
+		g, err := sysfile.ReadString(filepath.Join(d, "guid"))
 		if err != nil {
 			continue
 		}
-		guid := strings.ToLower(strings.TrimSpace(string(g)))
+		guid := strings.ToLower(g)
 		l, ok := layouts[guid]
 		if !ok {
 			continue
 		}
-		dev := &Device{path: filepath.Join(d, "telem"), guid: guid, layout: l}
+		path := filepath.Join(d, "telem")
+		f, err := sysfile.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("%s (%s): %w", d, l.gen, err)
+		}
+		dev := &Device{path: path, f: f, guid: guid, layout: l}
 		if _, err := dev.GTEnergyJoules(); err != nil {
+			dev.Close()
 			return nil, fmt.Errorf("%s (%s): %w", d, l.gen, err)
 		}
 		return dev, nil
@@ -87,14 +102,16 @@ func (d *Device) GTEnergyJoules() (float64, error) {
 }
 
 func (d *Device) readU64(offset int) (uint64, error) {
-	f, err := os.Open(d.path)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close() //nolint:errcheck
 	var b [8]byte
-	if _, err := f.ReadAt(b[:], int64(offset)); err != nil {
+	if err := d.f.ReadAt(b[:], int64(offset)); err != nil {
 		return 0, fmt.Errorf("read %s @0x%x: %w", d.path, offset, err)
 	}
 	return binary.LittleEndian.Uint64(b[:]), nil
+}
+
+// Close releases the telem file.
+func (d *Device) Close() {
+	if d != nil {
+		d.f.Close() //nolint:errcheck
+	}
 }

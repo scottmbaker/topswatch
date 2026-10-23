@@ -7,21 +7,27 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/scottmbaker/topswatch/internal/module"
+	"github.com/scottmbaker/topswatch/internal/sysfile"
 )
 
+// Every attribute sampled each tick is held open and re-read in place
+// (see sysfile); the discovery functions decide at Init what exists.
 type Module struct {
 	info    module.DeviceInfo
 	threads int
 
-	// Discovered paths (empty if unavailable)
-	raplEnergyPath string
-	raplMaxRange   uint64
-	hwmonTempPath  string
+	stat         *sysfile.File // /proc/stat: aggregate and per-core lines in one read
+	meminfo      *sysfile.File
+	freqs        []freqFile    // scaling_cur_freq of every CPU sysfs lists
+	rapl         *sysfile.File // package energy_uj; nil if unavailable
+	raplMaxRange uint64
+	hwmonTemp    *sysfile.File // nil if unavailable
 
 	// Delta state
 	prevStat       cpuStat
@@ -35,7 +41,19 @@ type Module struct {
 	prevPerCore map[int]perCoreStat // baselines for delta
 }
 
+// freqFile is one CPU's scaling_cur_freq held open.
+type freqFile struct {
+	id int
+	f  *sysfile.File
+}
+
 type cpuStat struct {
+	total uint64
+	idle  uint64
+}
+
+// perCoreStat is one logical CPU's jiffie totals.
+type perCoreStat struct {
 	total uint64
 	idle  uint64
 }
@@ -71,26 +89,35 @@ func (m *Module) Init() error {
 		},
 	}
 
+	stat, err := sysfile.Open("/proc/stat")
+	if err != nil {
+		return err
+	}
+	m.stat = stat
+	m.meminfo, _ = sysfile.Open("/proc/meminfo")
+	m.freqs = openFreqFiles()
+
 	// RAPL package energy (best-effort — often root-only)
-	if path, maxRange, err := discoverRAPL(); err == nil {
-		m.raplEnergyPath = path
+	if f, maxRange, err := discoverRAPL(); err == nil {
+		m.rapl = f
 		m.raplMaxRange = maxRange
-		log.Printf("[cpu] RAPL package energy at %s", path)
+		log.Printf("[cpu] RAPL package energy at %s", f.Path())
 	} else {
 		log.Printf("[cpu] RAPL unavailable: %v (power metric disabled)", err)
 	}
 
 	// hwmon CPU temperature (best-effort)
-	if path, err := discoverCPUHwmon(); err == nil {
-		m.hwmonTempPath = path
-		log.Printf("[cpu] package temperature at %s", path)
+	if f, err := discoverCPUHwmon(); err == nil {
+		m.hwmonTemp = f
+		log.Printf("[cpu] package temperature at %s", f.Path())
 	} else {
 		log.Printf("[cpu] CPU temperature unavailable: %v", err)
 	}
 
-	// Prime utilization baseline
-	if st, err := readCPUStat(); err == nil {
-		m.prevStat = st
+	// Prime utilization baselines, aggregate and per-core, from one read.
+	agg, perCore, err := m.readStat()
+	if err == nil {
+		m.prevStat = agg
 		m.prevStatSet = true
 	}
 
@@ -110,9 +137,7 @@ func (m *Module) Init() error {
 		}
 		log.Printf("[cpu] per-core topology: %d cores visible (P=%d E=%d LP=%d)",
 			len(cores), p, e, lp)
-		if pcs, err := readPerCoreStats(); err == nil {
-			m.prevPerCore = pcs
-		}
+		m.prevPerCore = perCore
 		// Stash core type counts in DeviceInfo so the UI can render badges.
 		m.info.Extra["p_cores"] = strconv.Itoa(p)
 		m.info.Extra["e_cores"] = strconv.Itoa(e)
@@ -129,10 +154,16 @@ func (m *Module) DeviceInfo() module.DeviceInfo { return m.info }
 func (m *Module) Collect() ([]module.Metric, error) {
 	var metrics []module.Metric
 
+	// One read of /proc/stat serves the aggregate and the per-core
+	// utilization; one read of each scaling_cur_freq serves the average
+	// and the per-core frequency.
+	st, perCore, statErr := m.readStat()
+	freqs := m.readFreqs()
+
 	// Utilization (delta of /proc/stat aggregate cpu line). Reported two
 	// ways: as a 0-100% aggregate, and as "cores busy" (0..N) which is
 	// the Irix-style sum that matches top's process column.
-	if st, err := readCPUStat(); err == nil {
+	if statErr == nil {
 		if m.prevStatSet && st.total > m.prevStat.total {
 			dTotal := st.total - m.prevStat.total
 			dIdle := st.idle - m.prevStat.idle
@@ -153,15 +184,19 @@ func (m *Module) Collect() ([]module.Metric, error) {
 	}
 
 	// Frequency (average across logical CPUs, MHz)
-	if mhz, ok := readAvgFreqMHz(); ok {
+	if len(freqs) > 0 {
+		var sum float64
+		for _, mhz := range freqs {
+			sum += mhz
+		}
 		metrics = append(metrics, module.Metric{
-			Name: "frequency", Value: mhz, Unit: "MHz",
+			Name: "frequency", Value: sum / float64(len(freqs)), Unit: "MHz",
 		})
 	}
 
 	// Power (RAPL energy_uj delta)
-	if m.raplEnergyPath != "" {
-		if uj, err := readUint(m.raplEnergyPath); err == nil {
+	if m.rapl != nil {
+		if uj, err := m.rapl.Uint(); err == nil {
 			now := time.Now()
 			if m.prevEnergySet {
 				var dUj uint64
@@ -187,7 +222,7 @@ func (m *Module) Collect() ([]module.Metric, error) {
 	// System memory. "Used" is total minus the kernel's MemAvailable
 	// estimate, which is what free(1) reports; on an integrated GPU the
 	// GPU's buffers live in this same pool and are part of "used".
-	if total, avail, ok := readMemInfo(); ok {
+	if total, avail, ok := m.readMemInfo(); ok {
 		used := total - avail
 		metrics = append(metrics,
 			module.Metric{Name: "memory_used", Value: float64(used), Unit: "bytes"},
@@ -197,8 +232,8 @@ func (m *Module) Collect() ([]module.Metric, error) {
 	}
 
 	// Temperature (hwmon coretemp/k10temp, millidegrees -> degrees)
-	if m.hwmonTempPath != "" {
-		if mC, err := readUint(m.hwmonTempPath); err == nil {
+	if m.hwmonTemp != nil {
+		if mC, err := m.hwmonTemp.Uint(); err == nil {
 			metrics = append(metrics, module.Metric{
 				Name: "temperature", Value: float64(mC) / 1000.0, Unit: "C",
 			})
@@ -206,19 +241,15 @@ func (m *Module) Collect() ([]module.Metric, error) {
 	}
 
 	// --- Per-core metrics ---
-	if len(m.cores) > 0 {
-		metrics = append(metrics, m.collectPerCore()...)
+	if len(m.cores) > 0 && statErr == nil {
+		metrics = append(metrics, m.collectPerCore(perCore, freqs)...)
 	}
 
 	return metrics, nil
 }
 
-func (m *Module) collectPerCore() []module.Metric {
+func (m *Module) collectPerCore(pcs map[int]perCoreStat, freqs map[int]float64) []module.Metric {
 	var out []module.Metric
-	pcs, err := readPerCoreStats()
-	if err != nil {
-		return nil
-	}
 
 	for _, c := range m.cores {
 		cur, ok := pcs[c.id]
@@ -249,7 +280,7 @@ func (m *Module) collectPerCore() []module.Metric {
 		}
 
 		// Frequency (instantaneous)
-		if mhz, ok := readPerCoreFreqMHz(c.id); ok {
+		if mhz, ok := freqs[c.id]; ok {
 			out = append(out, module.Metric{
 				Name: "core_frequency", Value: mhz, Unit: "MHz",
 				Labels: labels,
@@ -261,7 +292,16 @@ func (m *Module) collectPerCore() []module.Metric {
 	return out
 }
 
-func (m *Module) Close() error { return nil }
+func (m *Module) Close() error {
+	m.stat.Close()      //nolint:errcheck
+	m.meminfo.Close()   //nolint:errcheck
+	m.rapl.Close()      //nolint:errcheck
+	m.hwmonTemp.Close() //nolint:errcheck
+	for _, ff := range m.freqs {
+		ff.f.Close() //nolint:errcheck
+	}
+	return nil
+}
 
 // --- /proc/cpuinfo (static identity) ---
 
@@ -306,65 +346,119 @@ func parseCPUInfo(path string) (map[string]string, error) {
 
 // --- /proc/stat (utilization) ---
 
-func readCPUStat() (cpuStat, error) {
-	f, err := os.Open("/proc/stat")
+// readStat re-reads /proc/stat and parses the aggregate "cpu" line and
+// every "cpuN" line in one pass.
+func (m *Module) readStat() (cpuStat, map[int]perCoreStat, error) {
+	b, err := m.stat.Bytes()
 	if err != nil {
-		return cpuStat{}, err
+		return cpuStat{}, nil, err
 	}
-	defer f.Close() //nolint:errcheck
+	return parseStat(b)
+}
 
-	scanner := bufio.NewScanner(f)
-	if !scanner.Scan() {
-		return cpuStat{}, fmt.Errorf("empty /proc/stat")
+func parseStat(b []byte) (cpuStat, map[int]perCoreStat, error) {
+	var agg cpuStat
+	aggSet := false
+	perCore := map[int]perCoreStat{}
+	for len(b) > 0 {
+		line := b
+		if i := strings.IndexByte(string(b), '\n'); i >= 0 {
+			line, b = b[:i], b[i+1:]
+		} else {
+			b = nil
+		}
+		if len(line) < 4 || line[0] != 'c' || line[1] != 'p' || line[2] != 'u' {
+			continue
+		}
+		if line[3] == ' ' {
+			agg = sumStatFields(string(line[4:]))
+			aggSet = true
+			continue
+		}
+		end := 3
+		for end < len(line) && line[end] >= '0' && line[end] <= '9' {
+			end++
+		}
+		if end == 3 {
+			continue
+		}
+		id, err := strconv.Atoi(string(line[3:end]))
+		if err != nil {
+			continue
+		}
+		st := sumStatFields(string(line[end:]))
+		perCore[id] = perCoreStat{total: st.total, idle: st.idle}
 	}
-	line := scanner.Text()
-	if !strings.HasPrefix(line, "cpu ") {
-		return cpuStat{}, fmt.Errorf("unexpected /proc/stat format")
+	if !aggSet {
+		return cpuStat{}, nil, fmt.Errorf("no aggregate cpu line in /proc/stat")
 	}
-	// Fields: user nice system idle iowait irq softirq steal guest guest_nice
-	fields := strings.Fields(line)[1:]
-	var total, idle uint64
-	for i, fs := range fields {
+	return agg, perCore, nil
+}
+
+// sumStatFields sums the jiffie columns of one /proc/stat cpu line:
+// user nice system idle iowait irq softirq steal guest guest_nice.
+func sumStatFields(fields string) cpuStat {
+	var st cpuStat
+	for i, fs := range strings.Fields(fields) {
 		v, err := strconv.ParseUint(fs, 10, 64)
 		if err != nil {
 			continue
 		}
-		total += v
+		st.total += v
 		if i == 3 || i == 4 { // idle + iowait
-			idle += v
+			st.idle += v
 		}
 	}
-	return cpuStat{total: total, idle: idle}, nil
+	return st
 }
 
 // --- cpufreq (frequency) ---
 
-func readAvgFreqMHz() (float64, bool) {
+// openFreqFiles holds open the scaling_cur_freq of every CPU sysfs
+// lists, sorted by CPU id. The glob runs once, here, not every sample.
+func openFreqFiles() []freqFile {
 	matches, err := filepath.Glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq")
-	if err != nil || len(matches) == 0 {
-		return 0, false
+	if err != nil {
+		return nil
 	}
-	var sumKhz uint64
-	var n int
+	var out []freqFile
 	for _, p := range matches {
-		v, err := readUint(p)
+		idStr := strings.TrimPrefix(filepath.Base(filepath.Dir(filepath.Dir(p))), "cpu")
+		id, err := strconv.Atoi(idStr)
 		if err != nil {
 			continue
 		}
-		sumKhz += v
-		n++
+		f, err := sysfile.OpenUint(p)
+		if err != nil {
+			continue
+		}
+		out = append(out, freqFile{id: id, f: f})
 	}
-	if n == 0 {
-		return 0, false
+	sort.Slice(out, func(i, j int) bool { return out[i].id < out[j].id })
+	return out
+}
+
+// readFreqs returns the current frequency of every held CPU in MHz.
+func (m *Module) readFreqs() map[int]float64 {
+	out := make(map[int]float64, len(m.freqs))
+	for _, ff := range m.freqs {
+		khz, err := ff.f.Uint()
+		if err != nil {
+			continue
+		}
+		out[ff.id] = float64(khz) / 1000.0
 	}
-	return float64(sumKhz) / float64(n) / 1000.0, true
+	return out
 }
 
 // --- memory ---
 
 // readMemInfo returns MemTotal and MemAvailable in bytes.
-func readMemInfo() (total, avail uint64, ok bool) {
-	b, err := os.ReadFile("/proc/meminfo")
+func (m *Module) readMemInfo() (total, avail uint64, ok bool) {
+	if m.meminfo == nil {
+		return 0, 0, false
+	}
+	b, err := m.meminfo.Bytes()
 	if err != nil {
 		return 0, 0, false
 	}
@@ -389,11 +483,11 @@ func readMemInfo() (total, avail uint64, ok bool) {
 
 // --- RAPL (power) ---
 
-func discoverRAPL() (string, uint64, error) {
+func discoverRAPL() (*sysfile.File, uint64, error) {
 	// Prefer the package-level zone.
 	zones, err := filepath.Glob("/sys/class/powercap/intel-rapl:*")
 	if err != nil || len(zones) == 0 {
-		return "", 0, fmt.Errorf("no intel-rapl zones found")
+		return nil, 0, fmt.Errorf("no intel-rapl zones found")
 	}
 	// Filter to top-level package zones (intel-rapl:N, no further colons).
 	for _, z := range zones {
@@ -410,21 +504,22 @@ func discoverRAPL() (string, uint64, error) {
 			continue
 		}
 		energyPath := filepath.Join(z, "energy_uj")
-		if _, err := readUint(energyPath); err != nil {
-			return "", 0, fmt.Errorf("cannot read %s: %w", energyPath, err)
+		f, err := sysfile.OpenUint(energyPath)
+		if err != nil {
+			return nil, 0, fmt.Errorf("cannot read %s: %w", energyPath, err)
 		}
-		maxRange, _ := readUint(filepath.Join(z, "max_energy_range_uj"))
-		return energyPath, maxRange, nil
+		maxRange, _ := sysfile.ReadUint(filepath.Join(z, "max_energy_range_uj"))
+		return f, maxRange, nil
 	}
-	return "", 0, fmt.Errorf("no package-level RAPL zone found")
+	return nil, 0, fmt.Errorf("no package-level RAPL zone found")
 }
 
 // --- hwmon (temperature) ---
 
-func discoverCPUHwmon() (string, error) {
+func discoverCPUHwmon() (*sysfile.File, error) {
 	hwmons, err := filepath.Glob("/sys/class/hwmon/hwmon*")
 	if err != nil || len(hwmons) == 0 {
-		return "", fmt.Errorf("no hwmon entries")
+		return nil, fmt.Errorf("no hwmon entries")
 	}
 	for _, h := range hwmons {
 		nameBytes, err := os.ReadFile(filepath.Join(h, "name"))
@@ -435,21 +530,10 @@ func discoverCPUHwmon() (string, error) {
 		switch name {
 		case "coretemp", "k10temp", "zenpower":
 			// temp1_input is the package on coretemp; on k10temp it is Tctl/Tdie.
-			p := filepath.Join(h, "temp1_input")
-			if _, err := readUint(p); err == nil {
-				return p, nil
+			if f, err := sysfile.OpenUint(filepath.Join(h, "temp1_input")); err == nil {
+				return f, nil
 			}
 		}
 	}
-	return "", fmt.Errorf("no CPU temperature hwmon found")
-}
-
-// --- generic ---
-
-func readUint(path string) (uint64, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0, err
-	}
-	return strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	return nil, fmt.Errorf("no CPU temperature hwmon found")
 }

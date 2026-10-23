@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	drmBasePath    = "/sys/class/drm"
-	intelVendorID  = "0x8086"
+	drmBasePath   = "/sys/class/drm"
+	intelVendorID = "0x8086"
 )
 
 // cardDevice holds paths to a discovered Intel GPU DRM card.
